@@ -133,6 +133,16 @@ export interface GenerateReplyParams {
 // OpenClaw Plugin API Types (minimal, for type safety)
 // ============================================================
 
+/** Content block returned by tool execute() — MCP-style */
+export interface ToolContentBlock {
+  type: "text";
+  text: string;
+}
+
+export interface ToolResult {
+  content: ToolContentBlock[];
+}
+
 /** Minimal type for the OpenClaw plugin API passed to register() */
 export interface OpenClawPluginApi {
   logger: {
@@ -142,7 +152,7 @@ export interface OpenClawPluginApi {
     debug: (msg: string) => void;
   };
   config: Record<string, unknown>;
-  registerAgentTool: (tool: AgentToolDef) => void;
+  registerTool: (tool: AgentToolDef, opts?: { optional?: boolean }) => void;
   registerCommand: (cmd: CommandDef) => void;
   registerService: (svc: ServiceDef) => void;
   runtime?: {
@@ -156,8 +166,8 @@ export interface OpenClawPluginApi {
 export interface AgentToolDef {
   name: string;
   description: string;
-  schema: Record<string, unknown>;
-  handler: (params: Record<string, unknown>) => Promise<unknown>;
+  parameters: Record<string, unknown>;
+  execute: (id: string, params: Record<string, unknown>) => Promise<ToolResult>;
 }
 
 export interface CommandDef {

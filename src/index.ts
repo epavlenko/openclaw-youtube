@@ -17,6 +17,7 @@ import type {
   Video,
   Comment,
   ThreadReply,
+  ToolResult,
 } from "./types.js";
 import { resolveConfig } from "./types.js";
 import { getYouTubeService, getAuthenticatedChannelId } from "./auth.js";
@@ -511,13 +512,13 @@ export default function register(api: OpenClawPluginApi): void {
   api.logger.info("YouTube Comments plugin loading...");
 
   // --- Tool: youtube_scan ---
-  api.registerAgentTool({
+  api.registerTool({
     name: "youtube_scan",
     description:
       "Scan YouTube channel for new comments, generate AI replies. " +
       "Supports modes: 'dry-run' (preview only), 'interactive' (show one by one for approval), 'auto' (post all automatically). " +
       "Returns structured JSON with comments and proposed replies.",
-    schema: {
+    parameters: {
       type: "object",
       properties: {
         mode: {
@@ -544,16 +545,19 @@ export default function register(api: OpenClawPluginApi): void {
         },
       },
     },
-    handler: handleYoutubeScan,
+    async execute(_id, params) {
+      const result = await handleYoutubeScan(params);
+      return toolResult(result);
+    },
   });
 
   // --- Tool: youtube_generate ---
-  api.registerAgentTool({
+  api.registerTool({
     name: "youtube_generate",
     description:
       "Regenerate a reply for a specific YouTube comment. " +
       "Use when the user asks to regenerate, or to try a different identity.",
-    schema: {
+    parameters: {
       type: "object",
       properties: {
         commentId: {
@@ -567,16 +571,19 @@ export default function register(api: OpenClawPluginApi): void {
       },
       required: ["commentId"],
     },
-    handler: handleYoutubeGenerate,
+    async execute(_id, params) {
+      const result = await handleYoutubeGenerate(params);
+      return toolResult(result);
+    },
   });
 
   // --- Tool: youtube_reply ---
-  api.registerAgentTool({
+  api.registerTool({
     name: "youtube_reply",
     description:
       "Post a reply to a specific YouTube comment. " +
       "Use after the user approves a reply in interactive mode, or to post a custom reply.",
-    schema: {
+    parameters: {
       type: "object",
       properties: {
         commentId: {
@@ -590,19 +597,25 @@ export default function register(api: OpenClawPluginApi): void {
       },
       required: ["commentId", "text"],
     },
-    handler: handleYoutubeReply,
+    async execute(_id, params) {
+      const result = await handleYoutubeReply(params);
+      return toolResult(result);
+    },
   });
 
   // --- Tool: youtube_status ---
-  api.registerAgentTool({
+  api.registerTool({
     name: "youtube_status",
     description:
       "Get YouTube Comments plugin status: channel info, reply count, available identities, config.",
-    schema: {
+    parameters: {
       type: "object",
       properties: {},
     },
-    handler: handleYoutubeStatus,
+    async execute() {
+      const result = await handleYoutubeStatus();
+      return toolResult(result);
+    },
   });
 
   // --- Slash command: /yt ---
@@ -628,6 +641,13 @@ export default function register(api: OpenClawPluginApi): void {
 // ============================================================
 // Utility
 // ============================================================
+
+/** Wrap any JSON-serializable value into MCP-style tool result */
+function toolResult(data: unknown): ToolResult {
+  return {
+    content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+  };
+}
 
 function randomInt(min: number, max: number): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
