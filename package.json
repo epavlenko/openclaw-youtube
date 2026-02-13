@@ -1,0 +1,35 @@
+{
+  "name": "openclaw-youtube",
+  "version": "0.1.0",
+  "description": "OpenClaw plugin for managing YouTube channel comments — scan, generate AI replies, post with approval workflow",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "openclaw": {
+    "extensions": ["./src/index.ts"]
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit"
+  },
+  "keywords": [
+    "openclaw",
+    "youtube",
+    "comments",
+    "auto-reply",
+    "ai-assistant"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "googleapis": "^144.0.0",
+    "@google/generative-ai": "^0.24.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "@types/node": "^22.0.0"
+  }
+}

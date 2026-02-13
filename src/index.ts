@@ -1,0 +1,630 @@
+/**
+ * OpenClaw YouTube Comments Plugin — entry point.
+ *
+ * Registers:
+ *   - 4 agent tools: youtube_scan, youtube_generate, youtube_reply, youtube_status
+ *   - /yt slash command (no AI tokens)
+ *   - Background polling service
+ */
+
+import type { youtube_v3 } from "googleapis";
+import type {
+  OpenClawPluginApi,
+  PluginConfig,
+  ScanItem,
+  ScanResult,
+  ScanMode,
+  Video,
+  Comment,
+  ThreadReply,
+} from "./types.js";
+import { resolveConfig } from "./types.js";
+import { getYouTubeService, getAuthenticatedChannelId } from "./auth.js";
+import { getChannelVideos, getVideoInfo, scanVideoForTasks, postReply, formatThreadForPrompt } from "./youtube.js";
+import { loadState, saveState, markReplied } from "./state.js";
+import { loadIdentity, listIdentities } from "./identities.js";
+import { generateReply } from "./reply-generator.js";
+import { join } from "node:path";
+import { homedir } from "node:os";
+
+// ============================================================
+// Plugin state (shared across tools within a session)
+// ============================================================
+
+let youtube: youtube_v3.Youtube | null = null;
+let replyAsChannelId: string | null = null;
+let repliedSet: Set<string> = new Set();
+let pluginConfig: PluginConfig;
+let pluginApi: OpenClawPluginApi;
+let lastScanTime: string | null = null;
+
+/** State file path — defaults to ~/.openclaw/data/youtube-comments/replied_comments.json */
+function getStatePath(): string {
+  return join(homedir(), ".openclaw", "data", "youtube-comments", "replied_comments.json");
+}
+
+/** Token path */
+function getTokenPath(config: PluginConfig): string {
+  return config.oauthTokenPath ?? join(homedir(), ".openclaw", "data", "youtube-comments", "token.json");
+}
+
+// ============================================================
+// Initialization helper
+// ============================================================
+
+async function ensureInitialized(): Promise<void> {
+  const log = pluginApi.logger;
+
+  if (!youtube) {
+    const credPath = pluginConfig.oauthCredentialsPath;
+    if (!credPath) {
+      throw new Error("oauthCredentialsPath is not configured. Set it in the plugin config.");
+    }
+    youtube = await getYouTubeService(credPath, getTokenPath(pluginConfig), log);
+  }
+
+  if (!replyAsChannelId) {
+    replyAsChannelId = await getAuthenticatedChannelId(youtube);
+    if (!replyAsChannelId) {
+      throw new Error("Could not determine authenticated channel ID. Re-run OAuth setup.");
+    }
+    pluginApi.logger.info(`Authenticated as channel ${replyAsChannelId}`);
+  }
+
+  if (repliedSet.size === 0) {
+    repliedSet = await loadState(getStatePath());
+    pluginApi.logger.info(`Loaded ${repliedSet.size} previously replied comments`);
+  }
+}
+
+// ============================================================
+// Tool: youtube_scan
+// ============================================================
+
+async function handleYoutubeScan(params: Record<string, unknown>): Promise<ScanResult> {
+  await ensureInitialized();
+  const log = pluginApi.logger;
+
+  const mode = (params.mode as ScanMode) ?? "interactive";
+  const identityName = (params.identity as string) ?? pluginConfig.defaultIdentity;
+  const limit = params.limit as number | undefined;
+  const maxVideos = (params.maxVideos as number) ?? pluginConfig.maxRecentVideos;
+  const maxComments = (params.maxComments as number) ?? pluginConfig.maxCommentsPerVideo;
+
+  log.info(`youtube_scan: mode=${mode}, identity=${identityName}, limit=${limit ?? "none"}`);
+
+  // Get videos to check
+  let videos: Video[];
+  if (pluginConfig.videoIds && pluginConfig.videoIds.length > 0) {
+    videos = await Promise.all(pluginConfig.videoIds.map((id) => getVideoInfo(youtube!, id)));
+  } else {
+    videos = await getChannelVideos(youtube!, pluginConfig.channelId, maxVideos, log);
+  }
+
+  if (videos.length === 0) {
+    return { mode, identity: identityName, found: 0, items: [] };
+  }
+
+  // Scan all videos for tasks
+  const allTasks: { video: Video; comment: Comment; thread: ThreadReply[] }[] = [];
+  for (const video of videos) {
+    log.info(`Scanning: ${video.title} (${video.id})`);
+    const tasks = await scanVideoForTasks(youtube!, video, {
+      config: { ...pluginConfig, maxCommentsPerVideo: maxComments },
+      replyAsChannelId: replyAsChannelId!,
+      repliedSet,
+    }, log);
+    allTasks.push(...tasks);
+  }
+
+  // Apply limit
+  const tasksToProcess = limit ? allTasks.slice(0, limit) : allTasks;
+
+  // Generate replies for each task
+  const items: ScanItem[] = [];
+  for (const task of tasksToProcess) {
+    const isThread = task.thread.length > 0;
+
+    const proposedReply = await generateReply({
+      comment: task.comment,
+      video: task.video,
+      thread: task.thread,
+      identityName,
+      config: pluginConfig,
+      api: pluginApi,
+      logger: log,
+    });
+
+    if (proposedReply === null) {
+      // Model said SKIP — mark as replied so we don't ask again
+      repliedSet.add(task.comment.id);
+      items.push({
+        commentId: task.comment.id,
+        author: task.comment.author,
+        text: task.comment.text,
+        videoTitle: task.video.title,
+        videoId: task.video.id,
+        published: task.comment.published,
+        isThread,
+        thread: task.thread,
+        proposedReply: null,
+        status: "skipped",
+      });
+      continue;
+    }
+
+    // In auto mode, post immediately
+    if (mode === "auto") {
+      // Random delay to look natural
+      const delay = randomInt(pluginConfig.replyDelayMin, pluginConfig.replyDelayMax);
+      log.info(`Auto mode: waiting ${delay}s before posting...`);
+      await sleep(delay * 1000);
+
+      const success = await postReply(youtube!, task.comment.id, proposedReply, log);
+      if (success) {
+        await markReplied(getStatePath(), repliedSet, task.comment.id);
+        items.push({
+          commentId: task.comment.id,
+          author: task.comment.author,
+          text: task.comment.text,
+          videoTitle: task.video.title,
+          videoId: task.video.id,
+          published: task.comment.published,
+          isThread,
+          thread: task.thread,
+          proposedReply,
+          status: "posted",
+        });
+      } else {
+        items.push({
+          commentId: task.comment.id,
+          author: task.comment.author,
+          text: task.comment.text,
+          videoTitle: task.video.title,
+          videoId: task.video.id,
+          published: task.comment.published,
+          isThread,
+          thread: task.thread,
+          proposedReply,
+          status: "pending",
+        });
+      }
+    } else {
+      // dry-run or interactive: return pending items (agent handles the workflow)
+      items.push({
+        commentId: task.comment.id,
+        author: task.comment.author,
+        text: task.comment.text,
+        videoTitle: task.video.title,
+        videoId: task.video.id,
+        published: task.comment.published,
+        isThread,
+        thread: task.thread,
+        proposedReply,
+        status: "pending",
+      });
+    }
+  }
+
+  // Save state (skipped items already added above)
+  if (mode !== "auto") {
+    // In non-auto modes, only save skip markers
+    await saveState(getStatePath(), repliedSet);
+  }
+
+  lastScanTime = new Date().toISOString();
+
+  return {
+    mode,
+    identity: identityName,
+    found: items.length,
+    items,
+  };
+}
+
+// ============================================================
+// Tool: youtube_generate
+// ============================================================
+
+async function handleYoutubeGenerate(params: Record<string, unknown>): Promise<{
+  commentId: string;
+  proposedReply: string | null;
+  identity: string;
+}> {
+  await ensureInitialized();
+  const log = pluginApi.logger;
+
+  const commentId = params.commentId as string;
+  const identityName = (params.identity as string) ?? pluginConfig.defaultIdentity;
+
+  if (!commentId) {
+    throw new Error("commentId is required");
+  }
+
+  log.info(`youtube_generate: commentId=${commentId}, identity=${identityName}`);
+
+  // We need to fetch the comment and its context to generate a reply
+  // This is used for regeneration — fetch thread context fresh
+  const { google } = await import("googleapis");
+
+  // Fetch the comment thread to get video context
+  const threadResponse = await youtube!.comments.list({
+    part: ["snippet"],
+    id: [commentId],
+  });
+
+  const commentItem = threadResponse.data.items?.[0];
+  if (!commentItem?.snippet) {
+    throw new Error(`Comment ${commentId} not found`);
+  }
+
+  const parentId = commentItem.snippet.parentId ?? commentId;
+  const isReplyToReply = !!commentItem.snippet.parentId;
+
+  // Get the top-level comment
+  let topLevelCommentId = parentId;
+  let topLevelSnippet = commentItem.snippet;
+
+  if (isReplyToReply) {
+    // This comment is itself a reply — fetch the parent thread
+    const parentResponse = await youtube!.comments.list({
+      part: ["snippet"],
+      id: [parentId],
+    });
+    if (parentResponse.data.items?.[0]?.snippet) {
+      topLevelSnippet = parentResponse.data.items[0].snippet;
+      topLevelCommentId = parentId;
+    }
+  }
+
+  // Get video info
+  const videoId = topLevelSnippet.videoId ?? "";
+  const videoInfo = await getVideoInfo(youtube!, videoId);
+
+  // Build a Comment object
+  const comment: Comment = {
+    id: topLevelCommentId,
+    text: (topLevelSnippet.textDisplay ?? "").trim(),
+    author: topLevelSnippet.authorDisplayName ?? "Unknown",
+    published: topLevelSnippet.publishedAt ?? "",
+    replyCount: 0,
+  };
+
+  // Fetch thread context
+  let thread: ThreadReply[] = [];
+  try {
+    const repliesResponse = await youtube!.comments.list({
+      part: ["snippet"],
+      parentId: topLevelCommentId,
+      maxResults: 100,
+      textFormat: "plainText",
+    });
+
+    const ourChannelIds = new Set(
+      [replyAsChannelId!, pluginConfig.channelId].filter(Boolean),
+    );
+
+    for (const item of repliesResponse.data.items ?? []) {
+      const s = item.snippet;
+      if (!s) continue;
+      const authorChannel =
+        (s.authorChannelId as Record<string, string> | undefined)?.value ?? "";
+      thread.push({
+        author: s.authorDisplayName ?? "Unknown",
+        text: (s.textDisplay ?? "").trim(),
+        isOurs: ourChannelIds.has(authorChannel),
+      });
+    }
+  } catch {
+    // No thread — new comment
+  }
+
+  const proposedReply = await generateReply({
+    comment,
+    video: videoInfo,
+    thread,
+    identityName,
+    config: pluginConfig,
+    api: pluginApi,
+    logger: log,
+  });
+
+  return {
+    commentId,
+    proposedReply,
+    identity: identityName,
+  };
+}
+
+// ============================================================
+// Tool: youtube_reply
+// ============================================================
+
+async function handleYoutubeReply(params: Record<string, unknown>): Promise<{
+  commentId: string;
+  text: string;
+  success: boolean;
+}> {
+  await ensureInitialized();
+  const log = pluginApi.logger;
+
+  const commentId = params.commentId as string;
+  const text = params.text as string;
+
+  if (!commentId || !text) {
+    throw new Error("commentId and text are required");
+  }
+
+  log.info(`youtube_reply: posting to ${commentId}`);
+
+  const success = await postReply(youtube!, commentId, text, log);
+  if (success) {
+    await markReplied(getStatePath(), repliedSet, commentId);
+  }
+
+  return { commentId, text, success };
+}
+
+// ============================================================
+// Tool: youtube_status
+// ============================================================
+
+async function handleYoutubeStatus(): Promise<{
+  channelId: string;
+  repliedTotal: number;
+  lastScanTime: string | null;
+  availableIdentities: string[];
+  currentIdentity: string;
+  config: Record<string, unknown>;
+}> {
+  const identities = await listIdentities();
+
+  return {
+    channelId: pluginConfig.channelId,
+    repliedTotal: repliedSet.size,
+    lastScanTime,
+    availableIdentities: identities,
+    currentIdentity: pluginConfig.defaultIdentity,
+    config: {
+      maxRecentVideos: pluginConfig.maxRecentVideos,
+      maxCommentsPerVideo: pluginConfig.maxCommentsPerVideo,
+      maxCommentAgeDays: pluginConfig.maxCommentAgeDays,
+      minCommentLength: pluginConfig.minCommentLength,
+      replyDelayMin: pluginConfig.replyDelayMin,
+      replyDelayMax: pluginConfig.replyDelayMax,
+      pollIntervalMinutes: pluginConfig.pollIntervalMinutes,
+      geminiBackend: !!pluginConfig.geminiApiKey,
+    },
+  };
+}
+
+// ============================================================
+// /yt slash command
+// ============================================================
+
+async function handleYtCommand(ctx: { args?: string }): Promise<{ text: string }> {
+  const args = (ctx.args ?? "").trim();
+
+  if (args === "scan" || args === "check") {
+    try {
+      await ensureInitialized();
+      // Quick dry-run scan to count comments
+      const result = await handleYoutubeScan({ mode: "dry-run", limit: 100 });
+      const pendingCount = result.items.filter((i) => i.status === "pending").length;
+      const skippedCount = result.items.filter((i) => i.status === "skipped").length;
+      return {
+        text:
+          `Found ${result.found} new comments.\n` +
+          `Pending replies: ${pendingCount}\n` +
+          `Skipped (spam): ${skippedCount}\n` +
+          `Identity: ${result.identity}`,
+      };
+    } catch (err) {
+      return { text: `Error scanning: ${err}` };
+    }
+  }
+
+  if (args === "identities" || args === "ids") {
+    const ids = await listIdentities();
+    return {
+      text:
+        `Available identities: ${ids.join(", ") || "(none)"}\n` +
+        `Current default: ${pluginConfig.defaultIdentity}`,
+    };
+  }
+
+  // Default: status
+  const status = await handleYoutubeStatus();
+  return {
+    text:
+      `YouTube Comments Plugin\n` +
+      `Channel: ${status.channelId}\n` +
+      `Replied total: ${status.repliedTotal}\n` +
+      `Last scan: ${status.lastScanTime ?? "never"}\n` +
+      `Identity: ${status.currentIdentity}\n` +
+      `Available: ${status.availableIdentities.join(", ")}`,
+  };
+}
+
+// ============================================================
+// Background service
+// ============================================================
+
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+function startPollingService(): void {
+  const intervalMs = pluginConfig.pollIntervalMinutes * 60 * 1000;
+  if (intervalMs <= 0) {
+    pluginApi.logger.info("Background polling disabled (pollIntervalMinutes = 0)");
+    return;
+  }
+
+  pluginApi.logger.info(
+    `Starting background polling service (every ${pluginConfig.pollIntervalMinutes} min)`,
+  );
+
+  pollTimer = setInterval(async () => {
+    try {
+      pluginApi.logger.info("Background poll: checking for new comments...");
+      await ensureInitialized();
+
+      // Quick dry-run scan
+      const result = await handleYoutubeScan({ mode: "dry-run", limit: 50 });
+      const pendingCount = result.items.filter((i) => i.status === "pending").length;
+
+      if (pendingCount > 0) {
+        pluginApi.logger.info(`Background poll: found ${pendingCount} new comments`);
+        // The agent will pick this up and notify the user via Telegram
+      } else {
+        pluginApi.logger.debug("Background poll: no new comments");
+      }
+    } catch (err) {
+      pluginApi.logger.error(`Background poll error: ${err}`);
+    }
+  }, intervalMs);
+}
+
+function stopPollingService(): void {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+    pluginApi.logger.info("Background polling service stopped");
+  }
+}
+
+// ============================================================
+// Plugin registration
+// ============================================================
+
+export default function register(api: OpenClawPluginApi): void {
+  pluginApi = api;
+  pluginConfig = resolveConfig(api.config);
+
+  api.logger.info("YouTube Comments plugin loading...");
+
+  // --- Tool: youtube_scan ---
+  api.registerAgentTool({
+    name: "youtube_scan",
+    description:
+      "Scan YouTube channel for new comments, generate AI replies. " +
+      "Supports modes: 'dry-run' (preview only), 'interactive' (show one by one for approval), 'auto' (post all automatically). " +
+      "Returns structured JSON with comments and proposed replies.",
+    schema: {
+      type: "object",
+      properties: {
+        mode: {
+          type: "string",
+          enum: ["dry-run", "interactive", "auto"],
+          default: "interactive",
+          description: "Operating mode: dry-run (preview), interactive (approve each), auto (post all)",
+        },
+        identity: {
+          type: "string",
+          description: "Identity/persona name for reply generation (e.g. 'volkova', 'openprophet')",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of comments to process",
+        },
+        maxVideos: {
+          type: "number",
+          description: "Maximum number of recent videos to scan",
+        },
+        maxComments: {
+          type: "number",
+          description: "Maximum comments per video",
+        },
+      },
+    },
+    handler: handleYoutubeScan,
+  });
+
+  // --- Tool: youtube_generate ---
+  api.registerAgentTool({
+    name: "youtube_generate",
+    description:
+      "Regenerate a reply for a specific YouTube comment. " +
+      "Use when the user asks to regenerate, or to try a different identity.",
+    schema: {
+      type: "object",
+      properties: {
+        commentId: {
+          type: "string",
+          description: "YouTube comment ID to generate a reply for",
+        },
+        identity: {
+          type: "string",
+          description: "Identity/persona name (optional, uses default if not set)",
+        },
+      },
+      required: ["commentId"],
+    },
+    handler: handleYoutubeGenerate,
+  });
+
+  // --- Tool: youtube_reply ---
+  api.registerAgentTool({
+    name: "youtube_reply",
+    description:
+      "Post a reply to a specific YouTube comment. " +
+      "Use after the user approves a reply in interactive mode, or to post a custom reply.",
+    schema: {
+      type: "object",
+      properties: {
+        commentId: {
+          type: "string",
+          description: "YouTube comment ID to reply to",
+        },
+        text: {
+          type: "string",
+          description: "The reply text to post",
+        },
+      },
+      required: ["commentId", "text"],
+    },
+    handler: handleYoutubeReply,
+  });
+
+  // --- Tool: youtube_status ---
+  api.registerAgentTool({
+    name: "youtube_status",
+    description:
+      "Get YouTube Comments plugin status: channel info, reply count, available identities, config.",
+    schema: {
+      type: "object",
+      properties: {},
+    },
+    handler: handleYoutubeStatus,
+  });
+
+  // --- Slash command: /yt ---
+  api.registerCommand({
+    name: "yt",
+    description: "YouTube comments quick status. Subcommands: scan, identities",
+    acceptsArgs: true,
+    handler: handleYtCommand,
+  });
+
+  // --- Background service ---
+  api.registerService({
+    id: "youtube-comments-poll",
+    start: startPollingService,
+    stop: stopPollingService,
+  });
+
+  api.logger.info(
+    `YouTube Comments plugin loaded. Channel: ${pluginConfig.channelId}, identity: ${pluginConfig.defaultIdentity}`,
+  );
+}
+
+// ============================================================
+// Utility
+// ============================================================
+
+function randomInt(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

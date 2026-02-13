@@ -1,0 +1,86 @@
+{
+  "id": "youtube-comments",
+  "name": "YouTube Comments",
+  "description": "Manage YouTube channel comments — scan new comments, generate AI replies, post with approval workflow. Supports multiple identities, dry-run, interactive, and auto modes.",
+  "version": "0.1.0",
+  "skills": ["skills/youtube-comments"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "channelId": {
+        "type": "string",
+        "description": "YouTube channel ID to monitor for comments"
+      },
+      "videoIds": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Specific video IDs to monitor (overrides maxRecentVideos when set)"
+      },
+      "maxRecentVideos": {
+        "type": "number",
+        "default": 5,
+        "description": "Number of recent videos to check for comments"
+      },
+      "maxCommentsPerVideo": {
+        "type": "number",
+        "default": 50,
+        "description": "Maximum comments to fetch per video (max 100)"
+      },
+      "maxCommentAgeDays": {
+        "type": "number",
+        "default": 7,
+        "description": "Ignore comments older than this many days"
+      },
+      "minCommentLength": {
+        "type": "number",
+        "default": 3,
+        "description": "Skip comments shorter than this (likely spam or emoji-only)"
+      },
+      "defaultIdentity": {
+        "type": "string",
+        "default": "volkova",
+        "description": "Default identity/persona for reply generation"
+      },
+      "replyDelayMin": {
+        "type": "number",
+        "default": 10,
+        "description": "Minimum delay (seconds) before posting a reply in auto mode"
+      },
+      "replyDelayMax": {
+        "type": "number",
+        "default": 60,
+        "description": "Maximum delay (seconds) before posting a reply in auto mode"
+      },
+      "oauthCredentialsPath": {
+        "type": "string",
+        "description": "Path to Google OAuth client_secret.json file"
+      },
+      "oauthTokenPath": {
+        "type": "string",
+        "description": "Path to store/load OAuth token.json (default: ~/.openclaw/data/youtube-comments/token.json)"
+      },
+      "geminiApiKey": {
+        "type": "string",
+        "description": "Optional Gemini API key for direct reply generation. If not set, uses the OpenClaw connected model."
+      },
+      "geminiModel": {
+        "type": "string",
+        "default": "gemini-2.0-flash",
+        "description": "Gemini model to use when geminiApiKey is set"
+      },
+      "pollIntervalMinutes": {
+        "type": "number",
+        "default": 120,
+        "description": "How often (minutes) the background service checks for new comments. Set 0 to disable."
+      }
+    },
+    "required": ["channelId"]
+  },
+  "uiHints": {
+    "channelId": { "label": "YouTube Channel ID", "placeholder": "UCxxxxxxxxxxxxxxxx" },
+    "oauthCredentialsPath": { "label": "OAuth Credentials Path", "placeholder": "/path/to/client_secret.json" },
+    "geminiApiKey": { "label": "Gemini API Key (optional)", "sensitive": true },
+    "defaultIdentity": { "label": "Default Identity", "placeholder": "volkova" }
+  }
+}
