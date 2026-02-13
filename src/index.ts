@@ -38,14 +38,14 @@ let pluginConfig: PluginConfig;
 let pluginApi: OpenClawPluginApi;
 let lastScanTime: string | null = null;
 
-/** State file path — defaults to ~/.openclaw/data/youtube-comments/replied_comments.json */
+/** State file path — defaults to ~/.openclaw/data/openclaw-youtube/replied_comments.json */
 function getStatePath(): string {
-  return join(homedir(), ".openclaw", "data", "youtube-comments", "replied_comments.json");
+  return join(homedir(), ".openclaw", "data", "openclaw-youtube", "replied_comments.json");
 }
 
 /** Token path */
 function getTokenPath(config: PluginConfig): string {
-  return config.oauthTokenPath ?? join(homedir(), ".openclaw", "data", "youtube-comments", "token.json");
+  return config.oauthTokenPath ?? join(homedir(), ".openclaw", "data", "openclaw-youtube", "token.json");
 }
 
 // ============================================================
@@ -55,10 +55,18 @@ function getTokenPath(config: PluginConfig): string {
 async function ensureInitialized(): Promise<void> {
   const log = pluginApi.logger;
 
+  if (!pluginConfig.channelId) {
+    throw new Error(
+      "channelId is not configured. Set it in plugins.entries.openclaw-youtube.config.channelId",
+    );
+  }
+
   if (!youtube) {
     const credPath = pluginConfig.oauthCredentialsPath;
     if (!credPath) {
-      throw new Error("oauthCredentialsPath is not configured. Set it in the plugin config.");
+      throw new Error(
+        "oauthCredentialsPath is not configured. Set it in plugins.entries.openclaw-youtube.config.oauthCredentialsPath",
+      );
     }
     youtube = await getYouTubeService(credPath, getTokenPath(pluginConfig), log);
   }
@@ -607,7 +615,7 @@ export default function register(api: OpenClawPluginApi): void {
 
   // --- Background service ---
   api.registerService({
-    id: "youtube-comments-poll",
+    id: "openclaw-youtube-poll",
     start: startPollingService,
     stop: stopPollingService,
   });

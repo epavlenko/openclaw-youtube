@@ -1,5 +1,5 @@
 {
-  "id": "youtube-comments",
+  "id": "openclaw-youtube",
   "name": "YouTube Comments",
   "description": "Manage YouTube channel comments — scan new comments, generate AI replies, post with approval workflow. Supports multiple identities, dry-run, interactive, and auto modes.",
   "version": "0.1.0",
@@ -58,7 +58,7 @@
       },
       "oauthTokenPath": {
         "type": "string",
-        "description": "Path to store/load OAuth token.json (default: ~/.openclaw/data/youtube-comments/token.json)"
+        "description": "Path to store/load OAuth token.json (default: ~/.openclaw/data/openclaw-youtube/token.json)"
       },
       "geminiApiKey": {
         "type": "string",
@@ -75,7 +75,7 @@
         "description": "How often (minutes) the background service checks for new comments. Set 0 to disable."
       }
     },
-    "required": ["channelId"]
+    "required": []
   },
   "uiHints": {
     "channelId": { "label": "YouTube Channel ID", "placeholder": "UCxxxxxxxxxxxxxxxx" },
