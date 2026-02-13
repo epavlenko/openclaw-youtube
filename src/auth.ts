@@ -3,6 +3,14 @@
  *
  * Port of main.py:91-116 (get_youtube_service).
  * Uses googleapis npm package instead of google-auth-oauthlib.
+ *
+ * Supports two token formats:
+ *   - Native format: { access_token, refresh_token, token_type, expiry_date }
+ *   - Python bot format: { token, refresh_token, client_id, client_secret, expiry }
+ *
+ * Headless server support:
+ *   - Listens on 0.0.0.0 (not just localhost) so SSH port-forwarding works
+ *   - Prints clear instructions for manual auth via SSH tunnel
  */
 
 import { google } from "googleapis";
@@ -21,6 +29,16 @@ interface StoredToken {
   scope?: string;
 }
 
+/** Python bot token format (from google-auth Credentials.to_json()) */
+interface PythonToken {
+  token?: string;
+  refresh_token?: string;
+  client_id?: string;
+  client_secret?: string;
+  expiry?: string;
+  scopes?: string[];
+}
+
 interface OAuthClientSecrets {
   installed?: {
     client_id: string;
@@ -37,9 +55,9 @@ interface OAuthClientSecrets {
 /**
  * Build an authenticated YouTube Data API v3 service.
  *
- * - Loads OAuth token from tokenPath if it exists
+ * - Loads OAuth token from tokenPath if it exists (supports both native and Python formats)
  * - Refreshes expired tokens automatically
- * - If no token exists, runs a local OAuth flow (opens browser)
+ * - If no token exists, runs a local OAuth flow with headless-friendly instructions
  * - Saves the token after successful auth
  */
 export async function getYouTubeService(
@@ -67,12 +85,14 @@ export async function getYouTubeService(
   const oauth2Client = new google.auth.OAuth2(
     secrets.client_id,
     secrets.client_secret,
-    secrets.redirect_uris?.[0] ?? "http://localhost:8090",
+    "http://localhost:8090",
   );
 
   // Try to load existing token
   if (existsSync(tokenPath)) {
-    const tokenData = JSON.parse(await readFile(tokenPath, "utf-8")) as StoredToken;
+    const raw = JSON.parse(await readFile(tokenPath, "utf-8"));
+    const tokenData = normalizeToken(raw);
+
     oauth2Client.setCredentials({
       access_token: tokenData.access_token,
       refresh_token: tokenData.refresh_token,
@@ -100,8 +120,6 @@ export async function getYouTubeService(
       prompt: "consent",
     });
 
-    // For OpenClaw plugin context, we use a local server callback
-    // This mirrors the Python InstalledAppFlow.run_local_server(port=8090)
     const code = await getAuthCodeViaLocalServer(authUrl, 8090, log);
     const { tokens } = await oauth2Client.getToken(code);
     oauth2Client.setCredentials(tokens);
@@ -113,8 +131,44 @@ export async function getYouTubeService(
 }
 
 /**
- * Run a minimal local HTTP server to receive the OAuth callback.
- * Opens the auth URL in the user's browser and waits for the redirect.
+ * Normalize token from either native or Python bot format.
+ *
+ * Python bot (google-auth) saves:
+ *   { token, refresh_token, client_id, client_secret, expiry: "2026-02-13T..." }
+ *
+ * Our native format:
+ *   { access_token, refresh_token, token_type, expiry_date: 1739... }
+ */
+function normalizeToken(raw: Record<string, unknown>): StoredToken {
+  // Check if it's Python format (has "token" key instead of "access_token")
+  if ("token" in raw && !("access_token" in raw)) {
+    const pyToken = raw as unknown as PythonToken;
+    let expiryDate = 0;
+    if (pyToken.expiry) {
+      expiryDate = new Date(pyToken.expiry).getTime();
+    }
+    return {
+      access_token: pyToken.token ?? "",
+      refresh_token: pyToken.refresh_token ?? "",
+      token_type: "Bearer",
+      expiry_date: expiryDate,
+    };
+  }
+
+  // Native format
+  return {
+    access_token: (raw.access_token as string) ?? "",
+    refresh_token: (raw.refresh_token as string) ?? "",
+    token_type: (raw.token_type as string) ?? "Bearer",
+    expiry_date: (raw.expiry_date as number) ?? 0,
+  };
+}
+
+/**
+ * Run a local HTTP server to receive the OAuth callback.
+ *
+ * Binds to 0.0.0.0 so SSH port-forwarding works on headless servers.
+ * Prints clear instructions for both local and remote auth.
  */
 async function getAuthCodeViaLocalServer(
   authUrl: string,
@@ -149,25 +203,51 @@ async function getAuthCodeViaLocalServer(
       }
     });
 
-    server.listen(port, () => {
-      logger.info(`Open this URL to authenticate:\n${authUrl}`);
-      // Try to open in browser
-      import("node:child_process").then(({ exec }) => {
-        const cmd =
-          process.platform === "darwin"
-            ? `open "${authUrl}"`
-            : process.platform === "win32"
-              ? `start "${authUrl}"`
-              : `xdg-open "${authUrl}"`;
-        exec(cmd).unref?.();
-      });
+    // Listen on 0.0.0.0 so SSH tunneling works
+    server.listen(port, "0.0.0.0", () => {
+      logger.info(
+        `\n` +
+          `═══════════════════════════════════════════════════════\n` +
+          `  YouTube OAuth Authentication Required\n` +
+          `═══════════════════════════════════════════════════════\n` +
+          `\n` +
+          `  On a headless server? Run this on your LOCAL machine:\n` +
+          `\n` +
+          `    ssh -L 8090:localhost:8090 root@<your-server>\n` +
+          `\n` +
+          `  Then open this URL in your browser:\n` +
+          `\n` +
+          `  ${authUrl}\n` +
+          `\n` +
+          `  Waiting for authentication (10 min timeout)...\n` +
+          `═══════════════════════════════════════════════════════`,
+      );
+
+      // Try to open in browser (will silently fail on headless)
+      import("node:child_process")
+        .then(({ exec }) => {
+          const cmd =
+            process.platform === "darwin"
+              ? `open "${authUrl}"`
+              : process.platform === "win32"
+                ? `start "${authUrl}"`
+                : `xdg-open "${authUrl}" 2>/dev/null`;
+          exec(cmd).unref?.();
+        })
+        .catch(() => {});
     });
 
-    // Timeout after 5 minutes
+    // Timeout after 10 minutes (was 5, increased for headless setup)
     setTimeout(() => {
       server.close();
-      reject(new Error("OAuth authentication timed out (5 minutes)"));
-    }, 5 * 60 * 1000);
+      reject(
+        new Error(
+          "OAuth authentication timed out (10 minutes).\n" +
+            "Tip: you can copy an existing token.json from the Python bot:\n" +
+            "  scp local-machine:path/to/token.json server:~/.openclaw/data/openclaw-youtube/token.json",
+        ),
+      );
+    }, 10 * 60 * 1000);
   });
 }
 
