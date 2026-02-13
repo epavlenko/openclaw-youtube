@@ -20,7 +20,7 @@ import type {
   ToolResult,
 } from "./types.js";
 import { resolveConfig } from "./types.js";
-import { getYouTubeService, getAuthenticatedChannelId } from "./auth.js";
+import { getYouTubeService, getAuthenticatedChannelId, AuthRequiredError, completeOAuth } from "./auth.js";
 import { getChannelVideos, getVideoInfo, scanVideoForTasks, postReply, formatThreadForPrompt } from "./youtube.js";
 import { loadState, saveState, markReplied } from "./state.js";
 import { loadIdentity, listIdentities } from "./identities.js";
@@ -408,6 +408,43 @@ async function handleYoutubeStatus(): Promise<{
 }
 
 // ============================================================
+// Tool: youtube_auth
+// ============================================================
+
+async function handleYoutubeAuth(params: Record<string, unknown>): Promise<{
+  success: boolean;
+  message: string;
+}> {
+  const log = pluginApi.logger;
+  const code = (params.code as string ?? "").trim();
+
+  if (!code) {
+    throw new Error("Authorization code is required");
+  }
+
+  const credPath = pluginConfig.oauthCredentialsPath;
+  if (!credPath) {
+    throw new Error("oauthCredentialsPath is not configured");
+  }
+
+  try {
+    youtube = await completeOAuth(credPath, getTokenPath(pluginConfig), code, log);
+    replyAsChannelId = await getAuthenticatedChannelId(youtube);
+    repliedSet = await loadState(getStatePath());
+
+    return {
+      success: true,
+      message: `Authorized successfully! Channel: ${replyAsChannelId ?? "unknown"}. You can now scan comments.`,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      message: `Authorization failed: ${err}. Please try again.`,
+    };
+  }
+}
+
+// ============================================================
 // /yt slash command
 // ============================================================
 
@@ -555,8 +592,10 @@ export default function register(api: OpenClawPluginApi): void {
       },
     },
     async execute(_id, params) {
-      const result = await handleYoutubeScan(params);
-      return toolResult(result);
+      return withAuthHandling(async () => {
+        const result = await handleYoutubeScan(params);
+        return toolResult(result);
+      });
     },
   });
 
@@ -581,8 +620,10 @@ export default function register(api: OpenClawPluginApi): void {
       required: ["commentId"],
     },
     async execute(_id, params) {
-      const result = await handleYoutubeGenerate(params);
-      return toolResult(result);
+      return withAuthHandling(async () => {
+        const result = await handleYoutubeGenerate(params);
+        return toolResult(result);
+      });
     },
   });
 
@@ -607,8 +648,10 @@ export default function register(api: OpenClawPluginApi): void {
       required: ["commentId", "text"],
     },
     async execute(_id, params) {
-      const result = await handleYoutubeReply(params);
-      return toolResult(result);
+      return withAuthHandling(async () => {
+        const result = await handleYoutubeReply(params);
+        return toolResult(result);
+      });
     },
   });
 
@@ -623,6 +666,29 @@ export default function register(api: OpenClawPluginApi): void {
     },
     async execute() {
       const result = await handleYoutubeStatus();
+      return toolResult(result);
+    },
+  });
+
+  // --- Tool: youtube_auth ---
+  api.registerTool({
+    name: "youtube_auth",
+    description:
+      "Complete YouTube OAuth authorization. " +
+      "Use when the user pastes an authorization code after clicking the auth link. " +
+      "The code is shown by Google after the user grants access.",
+    parameters: {
+      type: "object",
+      properties: {
+        code: {
+          type: "string",
+          description: "The authorization code from Google (pasted by the user after granting access)",
+        },
+      },
+      required: ["code"],
+    },
+    async execute(_id, params) {
+      const result = await handleYoutubeAuth(params);
       return toolResult(result);
     },
   });
@@ -650,6 +716,25 @@ export default function register(api: OpenClawPluginApi): void {
 // ============================================================
 // Utility
 // ============================================================
+
+/**
+ * Wrap a tool handler to catch AuthRequiredError and return
+ * the auth URL as a friendly message instead of an error.
+ */
+async function withAuthHandling(fn: () => Promise<ToolResult>): Promise<ToolResult> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err instanceof AuthRequiredError) {
+      return toolResult({
+        authRequired: true,
+        message: err.message,
+        authUrl: err.authUrl,
+      });
+    }
+    throw err;
+  }
+}
 
 /** Wrap any JSON-serializable value into MCP-style tool result */
 function toolResult(data: unknown): ToolResult {

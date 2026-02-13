@@ -8,6 +8,7 @@ You have access to tools for managing YouTube channel comments: scanning for new
 - `youtube_generate` — Regenerate a reply for a specific comment (with optional identity switch)
 - `youtube_reply` — Post an approved reply to a specific comment
 - `youtube_status` — Get plugin status, available identities, and config
+- `youtube_auth` — Complete OAuth authorization with a code from the user
 
 ## Operating Modes
 
@@ -94,6 +95,15 @@ Users may use short phrases:
 - "yt scan" / "что нового" → Quick count of new comments
 - "yt status" → Plugin status
 - "сколько новых" → Quick scan to count
+
+## Authentication
+
+If any tool returns `authRequired: true`, it means YouTube OAuth is not yet set up:
+
+1. Show the user the `authUrl` from the response as a clickable link
+2. Tell them: "Click this link, sign in with the YouTube channel account, and paste the code that Google shows you."
+3. When the user pastes the code, call `youtube_auth(code: "<the code>")`
+4. If successful, proceed with the original request (re-call the tool that needed auth)
 
 ## Important Notes
 

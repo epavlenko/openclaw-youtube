@@ -1,16 +1,15 @@
 /**
  * OAuth 2.0 authentication for YouTube Data API.
  *
- * Port of main.py:91-116 (get_youtube_service).
- * Uses googleapis npm package instead of google-auth-oauthlib.
+ * Two-phase auth flow for Telegram/chat:
+ *   Phase 1: No token → generate auth URL, throw AuthRequiredError
+ *            (the agent shows the URL to the user in chat)
+ *   Phase 2: User pastes the redirect URL → youtube_auth tool extracts code,
+ *            exchanges for token, saves it
  *
  * Supports two token formats:
  *   - Native format: { access_token, refresh_token, token_type, expiry_date }
  *   - Python bot format: { token, refresh_token, client_id, client_secret, expiry }
- *
- * Headless server support:
- *   - Listens on 0.0.0.0 (not just localhost) so SSH port-forwarding works
- *   - Prints clear instructions for manual auth via SSH tunnel
  */
 
 import { google } from "googleapis";
@@ -20,6 +19,7 @@ import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 
 const SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"];
+const REDIRECT_URI = "urn:ietf:wg:oauth:2.0:oob";
 
 interface StoredToken {
   access_token: string;
@@ -53,21 +53,28 @@ interface OAuthClientSecrets {
 }
 
 /**
- * Build an authenticated YouTube Data API v3 service.
- *
- * - Loads OAuth token from tokenPath if it exists (supports both native and Python formats)
- * - Refreshes expired tokens automatically
- * - If no token exists, runs a local OAuth flow with headless-friendly instructions
- * - Saves the token after successful auth
+ * Custom error thrown when OAuth is needed.
+ * Contains the auth URL for the agent to show to the user.
  */
-export async function getYouTubeService(
-  credentialsPath: string,
-  tokenPath: string,
-  logger?: { info: (msg: string) => void; error: (msg: string) => void },
-): Promise<youtube_v3.Youtube> {
-  const log = logger ?? { info: console.log, error: console.error };
+export class AuthRequiredError extends Error {
+  public readonly authUrl: string;
 
-  // Load client secrets
+  constructor(authUrl: string) {
+    super(
+      `YouTube OAuth authorization required.\n\n` +
+        `Open this link and sign in with the YouTube channel account:\n${authUrl}\n\n` +
+        `After authorizing, Google will show you a code. ` +
+        `Copy that code and paste it here.`,
+    );
+    this.name = "AuthRequiredError";
+    this.authUrl = authUrl;
+  }
+}
+
+/** Load and parse client secrets file */
+export function loadClientSecrets(
+  credentialsPath: string,
+): { clientId: string; clientSecret: string } {
   if (!existsSync(credentialsPath)) {
     throw new Error(
       `OAuth credentials file not found at: ${credentialsPath}\n` +
@@ -76,17 +83,33 @@ export async function getYouTubeService(
     );
   }
 
-  const secretsRaw = JSON.parse(await readFile(credentialsPath, "utf-8")) as OAuthClientSecrets;
+  const secretsRaw = JSON.parse(
+    require("node:fs").readFileSync(credentialsPath, "utf-8"),
+  ) as OAuthClientSecrets;
   const secrets = secretsRaw.installed ?? secretsRaw.web;
   if (!secrets) {
     throw new Error("Invalid client_secret.json: missing 'installed' or 'web' key");
   }
 
-  const oauth2Client = new google.auth.OAuth2(
-    secrets.client_id,
-    secrets.client_secret,
-    "http://localhost:8090",
-  );
+  return { clientId: secrets.client_id, clientSecret: secrets.client_secret };
+}
+
+/**
+ * Build an authenticated YouTube Data API v3 service.
+ *
+ * - If token exists, loads and refreshes if needed
+ * - If no token exists, throws AuthRequiredError with the auth URL
+ *   (the calling tool catches this and returns the URL to the user)
+ */
+export async function getYouTubeService(
+  credentialsPath: string,
+  tokenPath: string,
+  logger?: { info: (msg: string) => void; error: (msg: string) => void },
+): Promise<youtube_v3.Youtube> {
+  const log = logger ?? { info: console.log, error: console.error };
+  const { clientId, clientSecret } = loadClientSecrets(credentialsPath);
+
+  const oauth2Client = new google.auth.OAuth2(clientId, clientSecret, REDIRECT_URI);
 
   // Try to load existing token
   if (existsSync(tokenPath)) {
@@ -111,33 +134,46 @@ export async function getYouTubeService(
       await saveToken(tokenPath, credentials as unknown as Record<string, unknown>);
       log.info("OAuth token refreshed successfully");
     }
-  } else {
-    // No token -- run OAuth flow
-    log.info("No OAuth token found, starting authentication flow...");
-    const authUrl = oauth2Client.generateAuthUrl({
-      access_type: "offline",
-      scope: SCOPES,
-      prompt: "consent",
-    });
 
-    const code = await getAuthCodeViaLocalServer(authUrl, 8090, log);
-    const { tokens } = await oauth2Client.getToken(code);
-    oauth2Client.setCredentials(tokens);
-    await saveToken(tokenPath, tokens as unknown as Record<string, unknown>);
-    log.info("OAuth authentication successful!");
+    return google.youtube({ version: "v3", auth: oauth2Client });
   }
+
+  // No token — generate auth URL and throw so the agent can show it
+  const authUrl = oauth2Client.generateAuthUrl({
+    access_type: "offline",
+    scope: SCOPES,
+    prompt: "consent",
+  });
+
+  throw new AuthRequiredError(authUrl);
+}
+
+/**
+ * Complete OAuth: exchange an authorization code for tokens.
+ * Called by the youtube_auth tool after the user pastes the code.
+ */
+export async function completeOAuth(
+  credentialsPath: string,
+  tokenPath: string,
+  code: string,
+  logger?: { info: (msg: string) => void; error: (msg: string) => void },
+): Promise<youtube_v3.Youtube> {
+  const log = logger ?? { info: console.log, error: console.error };
+  const { clientId, clientSecret } = loadClientSecrets(credentialsPath);
+
+  const oauth2Client = new google.auth.OAuth2(clientId, clientSecret, REDIRECT_URI);
+
+  log.info("Exchanging authorization code for token...");
+  const { tokens } = await oauth2Client.getToken(code);
+  oauth2Client.setCredentials(tokens);
+  await saveToken(tokenPath, tokens as unknown as Record<string, unknown>);
+  log.info("OAuth authentication successful!");
 
   return google.youtube({ version: "v3", auth: oauth2Client });
 }
 
 /**
  * Normalize token from either native or Python bot format.
- *
- * Python bot (google-auth) saves:
- *   { token, refresh_token, client_id, client_secret, expiry: "2026-02-13T..." }
- *
- * Our native format:
- *   { access_token, refresh_token, token_type, expiry_date: 1739... }
  */
 function normalizeToken(raw: Record<string, unknown>): StoredToken {
   // Check if it's Python format (has "token" key instead of "access_token")
@@ -162,93 +198,6 @@ function normalizeToken(raw: Record<string, unknown>): StoredToken {
     token_type: (raw.token_type as string) ?? "Bearer",
     expiry_date: (raw.expiry_date as number) ?? 0,
   };
-}
-
-/**
- * Run a local HTTP server to receive the OAuth callback.
- *
- * Binds to 0.0.0.0 so SSH port-forwarding works on headless servers.
- * Prints clear instructions for both local and remote auth.
- */
-async function getAuthCodeViaLocalServer(
-  authUrl: string,
-  port: number,
-  logger: { info: (msg: string) => void },
-): Promise<string> {
-  const { createServer } = await import("node:http");
-  const { URL } = await import("node:url");
-
-  return new Promise<string>((resolve, reject) => {
-    const server = createServer((req, res) => {
-      try {
-        const url = new URL(req.url ?? "/", `http://localhost:${port}`);
-        const code = url.searchParams.get("code");
-        if (code) {
-          res.writeHead(200, { "Content-Type": "text/html" });
-          res.end(
-            "<html><body><h2>Authentication successful!</h2>" +
-              "<p>You can close this tab and return to OpenClaw.</p></body></html>",
-          );
-          server.close();
-          resolve(code);
-        } else {
-          res.writeHead(400, { "Content-Type": "text/plain" });
-          res.end("Missing authorization code");
-        }
-      } catch (err) {
-        res.writeHead(500, { "Content-Type": "text/plain" });
-        res.end("Internal error");
-        server.close();
-        reject(err);
-      }
-    });
-
-    // Listen on 0.0.0.0 so SSH tunneling works
-    server.listen(port, "0.0.0.0", () => {
-      logger.info(
-        `\n` +
-          `═══════════════════════════════════════════════════════\n` +
-          `  YouTube OAuth Authentication Required\n` +
-          `═══════════════════════════════════════════════════════\n` +
-          `\n` +
-          `  On a headless server? Run this on your LOCAL machine:\n` +
-          `\n` +
-          `    ssh -L 8090:localhost:8090 root@<your-server>\n` +
-          `\n` +
-          `  Then open this URL in your browser:\n` +
-          `\n` +
-          `  ${authUrl}\n` +
-          `\n` +
-          `  Waiting for authentication (10 min timeout)...\n` +
-          `═══════════════════════════════════════════════════════`,
-      );
-
-      // Try to open in browser (will silently fail on headless)
-      import("node:child_process")
-        .then(({ exec }) => {
-          const cmd =
-            process.platform === "darwin"
-              ? `open "${authUrl}"`
-              : process.platform === "win32"
-                ? `start "${authUrl}"`
-                : `xdg-open "${authUrl}" 2>/dev/null`;
-          exec(cmd).unref?.();
-        })
-        .catch(() => {});
-    });
-
-    // Timeout after 10 minutes (was 5, increased for headless setup)
-    setTimeout(() => {
-      server.close();
-      reject(
-        new Error(
-          "OAuth authentication timed out (10 minutes).\n" +
-            "Tip: you can copy an existing token.json from the Python bot:\n" +
-            "  scp local-machine:path/to/token.json server:~/.openclaw/data/openclaw-youtube/token.json",
-        ),
-      );
-    }, 10 * 60 * 1000);
-  });
 }
 
 /** Save OAuth token to disk */
