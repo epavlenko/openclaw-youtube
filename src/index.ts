@@ -477,26 +477,139 @@ async function handleYoutubeAuth(params: Record<string, unknown>): Promise<{
 async function handleYtCommand(ctx: { args?: string }): Promise<{ text: string }> {
   const args = (ctx.args ?? "").trim();
 
-  if (args === "scan" || args === "check") {
+  if (args === "help") {
+    return {
+      text:
+        `YouTube Comments Plugin\n` +
+        `\n` +
+        `Commands:\n` +
+        `  /yt              — channel status & config\n` +
+        `  /yt scan         — scan & review comments one by one\n` +
+        `  /yt preview      — preview all replies without posting\n` +
+        `  /yt auto         — generate & post all replies automatically\n` +
+        `  /yt identities   — list available personas\n` +
+        `  /yt help         — this message\n` +
+        `\n` +
+        `Options:\n` +
+        `  as <identity>    — use a specific persona (e.g. /yt scan as openprophet)\n` +
+        `  limit <N>        — process at most N comments (e.g. /yt preview limit 5)\n` +
+        `\n` +
+        `Examples:\n` +
+        `  /yt scan as volkova limit 10\n` +
+        `  /yt preview as openprophet\n` +
+        `  /yt auto limit 3`,
+    };
+  }
+
+  // Parse "as <identity>" and "limit <N>" options from args
+  const identityMatch = args.match(/\bas\s+(\w+)/);
+  const limitMatch = args.match(/\blimit\s+(\d+)/);
+  const scanIdentity = identityMatch?.[1];
+  const scanLimit = limitMatch ? parseInt(limitMatch[1], 10) : undefined;
+  // Strip options to get the bare subcommand
+  const subcommand = args.replace(/\bas\s+\w+/, "").replace(/\blimit\s+\d+/, "").trim();
+
+  if (subcommand === "scan" || subcommand === "check") {
     try {
       await ensureInitialized();
-      // Quick dry-run scan to count comments
-      const result = await handleYoutubeScan({ mode: "dry-run", limit: 100 });
+      const scanParams: Record<string, unknown> = { mode: "interactive" };
+      if (scanIdentity) scanParams.identity = scanIdentity;
+      if (scanLimit) scanParams.limit = scanLimit;
+      const result = await handleYoutubeScan(scanParams);
       const pendingCount = result.items.filter((i) => i.status === "pending").length;
       const skippedCount = result.items.filter((i) => i.status === "skipped").length;
-      return {
-        text:
-          `Found ${result.found} new comments.\n` +
-          `Pending replies: ${pendingCount}\n` +
-          `Skipped (spam): ${skippedCount}\n` +
-          `Identity: ${result.identity}`,
-      };
+      if (pendingCount === 0) {
+        return { text: `No new comments found. (scanned ${result.found} total, ${skippedCount} skipped)` };
+      }
+      // Format each pending item for the agent to present
+      const lines: string[] = [`Found ${pendingCount} comments to review (${skippedCount} skipped):\n`];
+      for (const item of result.items) {
+        if (item.status === "skipped") continue;
+        lines.push(`---`);
+        lines.push(`Video: ${item.videoTitle}`);
+        lines.push(`@${item.author} (${item.published}):`);
+        lines.push(item.text);
+        if (item.isThread && item.thread.length > 0) {
+          lines.push(`Thread:`);
+          for (const r of item.thread) {
+            lines.push(`  @${r.author}${r.isOurs ? " (you)" : ""}: ${r.text}`);
+          }
+        }
+        if (item.proposedReply) {
+          lines.push(`Proposed reply: ${item.proposedReply}`);
+        }
+        lines.push(`[commentId: ${item.commentId}]`);
+        lines.push(``);
+      }
+      return { text: lines.join("\n") };
     } catch (err) {
-      return { text: `Error scanning: ${err}` };
+      return { text: `Error: ${err}` };
     }
   }
 
-  if (args === "identities" || args === "ids") {
+  if (subcommand === "preview" || subcommand === "dry-run") {
+    try {
+      await ensureInitialized();
+      const scanParams: Record<string, unknown> = { mode: "dry-run" };
+      if (scanIdentity) scanParams.identity = scanIdentity;
+      if (scanLimit) scanParams.limit = scanLimit;
+      const result = await handleYoutubeScan(scanParams);
+      const pendingCount = result.items.filter((i) => i.status === "pending").length;
+      const skippedCount = result.items.filter((i) => i.status === "skipped").length;
+      if (pendingCount === 0) {
+        return { text: `No new comments found. (${skippedCount} skipped)` };
+      }
+      const lines: string[] = [`Preview: ${pendingCount} comments (${skippedCount} skipped)\n`];
+      for (const item of result.items) {
+        if (item.status === "skipped") continue;
+        lines.push(`---`);
+        lines.push(`Video: ${item.videoTitle}`);
+        lines.push(`@${item.author}: ${item.text}`);
+        if (item.isThread && item.thread.length > 0) {
+          for (const r of item.thread) {
+            lines.push(`  @${r.author}${r.isOurs ? " (you)" : ""}: ${r.text}`);
+          }
+        }
+        lines.push(`Reply: ${item.proposedReply ?? "(agent will generate)"}`);
+        lines.push(``);
+      }
+      lines.push(`(dry-run — nothing posted)`);
+      return { text: lines.join("\n") };
+    } catch (err) {
+      return { text: `Error: ${err}` };
+    }
+  }
+
+  if (subcommand === "auto") {
+    try {
+      await ensureInitialized();
+      const scanParams: Record<string, unknown> = { mode: "auto" };
+      if (scanIdentity) scanParams.identity = scanIdentity;
+      if (scanLimit) scanParams.limit = scanLimit;
+      const result = await handleYoutubeScan(scanParams);
+      const postedCount = result.items.filter((i) => i.status === "posted").length;
+      const pendingCount = result.items.filter((i) => i.status === "pending").length;
+      const skippedCount = result.items.filter((i) => i.status === "skipped").length;
+      const lines: string[] = [];
+      if (postedCount > 0) {
+        lines.push(`Auto-posted ${postedCount} replies.`);
+      }
+      if (pendingCount > 0) {
+        lines.push(`${pendingCount} replies need agent to generate & post.`);
+      }
+      if (skippedCount > 0) {
+        lines.push(`${skippedCount} skipped.`);
+      }
+      if (lines.length === 0) {
+        lines.push(`No new comments found.`);
+      }
+      return { text: lines.join("\n") };
+    } catch (err) {
+      return { text: `Error: ${err}` };
+    }
+  }
+
+  if (subcommand === "identities" || subcommand === "ids") {
     const ids = await listIdentities();
     return {
       text:
@@ -505,7 +618,7 @@ async function handleYtCommand(ctx: { args?: string }): Promise<{ text: string }
     };
   }
 
-  // Default: status
+  // Default: status (bare /yt, /yt status, or unknown subcommand)
   const status = await handleYoutubeStatus();
   return {
     text:

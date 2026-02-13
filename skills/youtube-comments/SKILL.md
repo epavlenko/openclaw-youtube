@@ -153,13 +153,19 @@ When the user says "ответь на все автоматически", "auto-
 - Mark replies by our channel with "(you)" when displaying
 - Thread replies use a different prompt template optimized for continuing conversations
 
-## Quick Commands
+## Slash Commands
 
-Users may use short phrases:
-- "yt" / "комментарии" / "comments" → Interactive scan with defaults
-- "yt scan" / "что нового" → Quick count of new comments
-- "yt status" → Plugin status
-- "сколько новых" → Quick scan to count
+Users can invoke actions directly via `/yt`:
+- `/yt` — channel status & config
+- `/yt scan` — scan & review comments one by one (interactive)
+- `/yt preview` — preview all replies without posting (dry-run)
+- `/yt auto` — generate & post all replies automatically
+- `/yt identities` — list available personas
+- `/yt help` — show all commands
+
+Options can be appended: `/yt scan as openprophet limit 5`
+
+Natural language also works: "проверь комментарии", "check comments", "preview replies", etc.
 
 ## Authentication
 
