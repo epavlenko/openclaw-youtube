@@ -507,7 +507,16 @@ function stopPollingService(): void {
 
 export default function register(api: OpenClawPluginApi): void {
   pluginApi = api;
-  pluginConfig = resolveConfig(api.config);
+
+  // api.config is the FULL OpenClaw gateway config.
+  // Our plugin config lives at plugins.entries.openclaw-youtube.config
+  const fullConfig = api.config as Record<string, unknown>;
+  const pluginsSection = (fullConfig.plugins ?? {}) as Record<string, unknown>;
+  const entriesSection = (pluginsSection.entries ?? {}) as Record<string, unknown>;
+  const ourEntry = (entriesSection["openclaw-youtube"] ?? {}) as Record<string, unknown>;
+  const ourConfig = (ourEntry.config ?? {}) as Record<string, unknown>;
+
+  pluginConfig = resolveConfig(ourConfig);
 
   api.logger.info("YouTube Comments plugin loading...");
 
