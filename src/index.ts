@@ -21,10 +21,10 @@ import type {
 } from "./types.js";
 import { resolveConfig } from "./types.js";
 import { getYouTubeService, getAuthenticatedChannelId, AuthRequiredError, completeOAuth } from "./auth.js";
-import { getChannelVideos, getVideoInfo, scanVideoForTasks, postReply, formatThreadForPrompt } from "./youtube.js";
+import { getChannelVideos, getVideoInfo, scanVideoForTasks, postReply } from "./youtube.js";
 import { loadState, saveState, markReplied } from "./state.js";
-import { loadIdentity, listIdentities } from "./identities.js";
-import { generateReply } from "./reply-generator.js";
+import { loadIdentity, listIdentities, buildNewCommentPrompt, buildThreadReplyPrompt, formatThreadForPrompt } from "./identities.js";
+import { generateReply, detectBackend } from "./reply-generator.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -110,8 +110,12 @@ async function handleYoutubeScan(params: Record<string, unknown>): Promise<ScanR
     videos = await getChannelVideos(youtube!, pluginConfig.channelId, maxVideos, log);
   }
 
+  // Load identity text once for the entire scan
+  const identityText = await loadIdentity(identityName);
+  const hasBackend = detectBackend(pluginConfig, pluginApi) !== null;
+
   if (videos.length === 0) {
-    return { mode, identity: identityName, found: 0, items: [] };
+    return { mode, identity: identityName, identityPrompt: identityText, found: 0, items: [] };
   }
 
   // Scan all videos for tasks
@@ -129,22 +133,26 @@ async function handleYoutubeScan(params: Record<string, unknown>): Promise<ScanR
   // Apply limit
   const tasksToProcess = limit ? allTasks.slice(0, limit) : allTasks;
 
-  // Generate replies for each task
+  // Generate replies for each task (only when a backend is available)
   const items: ScanItem[] = [];
   for (const task of tasksToProcess) {
     const isThread = task.thread.length > 0;
 
-    const proposedReply = await generateReply({
-      comment: task.comment,
-      video: task.video,
-      thread: task.thread,
-      identityName,
-      config: pluginConfig,
-      api: pluginApi,
-      logger: log,
-    });
+    // When no backend, skip plugin-side generation — agent will generate via identityPrompt
+    let proposedReply: string | null = null;
+    if (hasBackend) {
+      proposedReply = await generateReply({
+        comment: task.comment,
+        video: task.video,
+        thread: task.thread,
+        identityName,
+        config: pluginConfig,
+        api: pluginApi,
+        logger: log,
+      });
+    }
 
-    if (proposedReply === null) {
+    if (hasBackend && proposedReply === null) {
       // Model said SKIP — mark as replied so we don't ask again
       repliedSet.add(task.comment.id);
       items.push({
@@ -152,6 +160,7 @@ async function handleYoutubeScan(params: Record<string, unknown>): Promise<ScanR
         author: task.comment.author,
         text: task.comment.text,
         videoTitle: task.video.title,
+        videoDescription: task.video.description,
         videoId: task.video.id,
         published: task.comment.published,
         isThread,
@@ -162,8 +171,8 @@ async function handleYoutubeScan(params: Record<string, unknown>): Promise<ScanR
       continue;
     }
 
-    // In auto mode, post immediately
-    if (mode === "auto") {
+    // In auto mode with a backend, post immediately
+    if (mode === "auto" && proposedReply) {
       // Random delay to look natural
       const delay = randomInt(pluginConfig.replyDelayMin, pluginConfig.replyDelayMax);
       log.info(`Auto mode: waiting ${delay}s before posting...`);
@@ -177,6 +186,7 @@ async function handleYoutubeScan(params: Record<string, unknown>): Promise<ScanR
           author: task.comment.author,
           text: task.comment.text,
           videoTitle: task.video.title,
+          videoDescription: task.video.description,
           videoId: task.video.id,
           published: task.comment.published,
           isThread,
@@ -190,6 +200,7 @@ async function handleYoutubeScan(params: Record<string, unknown>): Promise<ScanR
           author: task.comment.author,
           text: task.comment.text,
           videoTitle: task.video.title,
+          videoDescription: task.video.description,
           videoId: task.video.id,
           published: task.comment.published,
           isThread,
@@ -199,12 +210,13 @@ async function handleYoutubeScan(params: Record<string, unknown>): Promise<ScanR
         });
       }
     } else {
-      // dry-run or interactive: return pending items (agent handles the workflow)
+      // dry-run, interactive, or auto without backend: return pending items
       items.push({
         commentId: task.comment.id,
         author: task.comment.author,
         text: task.comment.text,
         videoTitle: task.video.title,
+        videoDescription: task.video.description,
         videoId: task.video.id,
         published: task.comment.published,
         isThread,
@@ -226,6 +238,7 @@ async function handleYoutubeScan(params: Record<string, unknown>): Promise<ScanR
   return {
     mode,
     identity: identityName,
+    identityPrompt: identityText,
     found: items.length,
     items,
   };
@@ -238,6 +251,7 @@ async function handleYoutubeScan(params: Record<string, unknown>): Promise<ScanR
 async function handleYoutubeGenerate(params: Record<string, unknown>): Promise<{
   commentId: string;
   proposedReply: string | null;
+  prompt: string | null;
   identity: string;
 }> {
   await ensureInitialized();
@@ -254,7 +268,6 @@ async function handleYoutubeGenerate(params: Record<string, unknown>): Promise<{
 
   // We need to fetch the comment and its context to generate a reply
   // This is used for regeneration — fetch thread context fresh
-  const { google } = await import("googleapis");
 
   // Fetch the comment thread to get video context
   const threadResponse = await youtube!.comments.list({
@@ -328,21 +341,34 @@ async function handleYoutubeGenerate(params: Record<string, unknown>): Promise<{
     // No thread — new comment
   }
 
-  const proposedReply = await generateReply({
-    comment,
-    video: videoInfo,
-    thread,
-    identityName,
-    config: pluginConfig,
-    api: pluginApi,
-    logger: log,
-  });
+  const hasBackend = detectBackend(pluginConfig, pluginApi) !== null;
 
-  return {
-    commentId,
-    proposedReply,
-    identity: identityName,
-  };
+  if (hasBackend) {
+    const proposedReply = await generateReply({
+      comment,
+      video: videoInfo,
+      thread,
+      identityName,
+      config: pluginConfig,
+      api: pluginApi,
+      logger: log,
+    });
+
+    return { commentId, proposedReply, prompt: null, identity: identityName };
+  }
+
+  // No backend — return the built prompt so the agent can generate itself
+  const identityText = await loadIdentity(identityName);
+  const isThread = thread.length > 0;
+  let prompt: string;
+  if (isThread) {
+    const threadText = formatThreadForPrompt(comment, thread);
+    prompt = buildThreadReplyPrompt(identityText, videoInfo, threadText);
+  } else {
+    prompt = buildNewCommentPrompt(identityText, videoInfo, comment.text);
+  }
+
+  return { commentId, proposedReply: null, prompt, identity: identityName };
 }
 
 // ============================================================

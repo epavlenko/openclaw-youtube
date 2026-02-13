@@ -48,6 +48,7 @@ export interface ScanItem {
   author: string;
   text: string;
   videoTitle: string;
+  videoDescription: string;
   videoId: string;
   published: string;
   isThread: boolean;
@@ -61,6 +62,7 @@ export type ScanMode = "dry-run" | "interactive" | "auto";
 export interface ScanResult {
   mode: ScanMode;
   identity: string;
+  identityPrompt: string;
   found: number;
   items: ScanItem[];
 }

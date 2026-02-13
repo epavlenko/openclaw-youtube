@@ -67,6 +67,10 @@ export async function generateReply(opts: GenerateReplyOptions): Promise<string 
 
   // Choose backend
   const backend = detectBackend(opts.config, opts.api);
+  if (!backend) {
+    log.debug("No reply generation backend available — skipping plugin-side generation");
+    return null;
+  }
   log.debug(`Using ${backend} backend for reply generation`);
 
   let reply: string;
@@ -125,7 +129,7 @@ export async function regenerateReply(
 // Backend detection
 // ============================================================
 
-function detectBackend(config: PluginConfig, api?: OpenClawPluginApi): ReplyBackend {
+export function detectBackend(config: PluginConfig, api?: OpenClawPluginApi): ReplyBackend | null {
   // If Gemini API key is configured, use direct Gemini
   if (config.geminiApiKey) {
     return "gemini";
@@ -134,11 +138,8 @@ function detectBackend(config: PluginConfig, api?: OpenClawPluginApi): ReplyBack
   if (api?.runtime?.llm) {
     return "openclaw";
   }
-  // Fallback: if neither is available, throw
-  throw new Error(
-    "No reply generation backend available. Either set geminiApiKey in config, " +
-      "or ensure OpenClaw has a connected LLM model.",
-  );
+  // No backend available — caller should handle this gracefully
+  return null;
 }
 
 // ============================================================

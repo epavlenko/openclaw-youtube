@@ -24,7 +24,9 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "googleapis": "^144.0.0",
+    "googleapis": "^144.0.0"
+  },
+  "optionalDependencies": {
     "@google/generative-ai": "^0.24.0"
   },
   "devDependencies": {
