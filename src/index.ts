@@ -523,23 +523,26 @@ async function handleYtCommand(ctx: { args?: string }): Promise<{ text: string }
       }
       // Format each pending item for the agent to present
       const lines: string[] = [`Found ${pendingCount} comments to review (${skippedCount} skipped):\n`];
+      let idx = 0;
       for (const item of result.items) {
         if (item.status === "skipped") continue;
+        idx++;
         lines.push(`---`);
-        lines.push(`Video: ${item.videoTitle}`);
-        lines.push(`@${item.author} (${item.published}):`);
-        lines.push(item.text);
+        lines.push(`**${idx}.** 🎬 **${item.videoTitle}**`);
+        lines.push(`**@${item.author}** · ${timeAgo(item.published)}\n`);
+        lines.push(`> ${item.text.split("\n").join("\n> ")}\n`);
         if (item.isThread && item.thread.length > 0) {
           lines.push(`Thread:`);
           for (const r of item.thread) {
-            lines.push(`  @${r.author}${r.isOurs ? " (you)" : ""}: ${r.text}`);
+            lines.push(`> **@${r.author}**${r.isOurs ? " (you)" : ""}: ${r.text}`);
           }
+          lines.push(``);
         }
         if (item.proposedReply) {
-          lines.push(`Proposed reply: ${item.proposedReply}`);
+          lines.push(`Proposed reply:`);
+          lines.push(`> ${item.proposedReply.split("\n").join("\n> ")}\n`);
         }
-        lines.push(`[commentId: ${item.commentId}]`);
-        lines.push(``);
+        lines.push(`\`commentId: ${item.commentId}\`\n`);
       }
       return { text: lines.join("\n") };
     } catch (err) {
@@ -560,20 +563,25 @@ async function handleYtCommand(ctx: { args?: string }): Promise<{ text: string }
         return { text: `No new comments found. (${skippedCount} skipped)` };
       }
       const lines: string[] = [`Preview: ${pendingCount} comments (${skippedCount} skipped)\n`];
+      let idx = 0;
       for (const item of result.items) {
         if (item.status === "skipped") continue;
+        idx++;
         lines.push(`---`);
-        lines.push(`Video: ${item.videoTitle}`);
-        lines.push(`@${item.author}: ${item.text}`);
+        lines.push(`**${idx}.** 🎬 **${item.videoTitle}**`);
+        lines.push(`**@${item.author}** · ${timeAgo(item.published)}\n`);
+        lines.push(`> ${item.text.split("\n").join("\n> ")}\n`);
         if (item.isThread && item.thread.length > 0) {
+          lines.push(`Thread:`);
           for (const r of item.thread) {
-            lines.push(`  @${r.author}${r.isOurs ? " (you)" : ""}: ${r.text}`);
+            lines.push(`> **@${r.author}**${r.isOurs ? " (you)" : ""}: ${r.text}`);
           }
+          lines.push(``);
         }
-        lines.push(`Reply: ${item.proposedReply ?? "(agent will generate)"}`);
-        lines.push(``);
+        lines.push(`Reply:`);
+        lines.push(`> ${item.proposedReply ? item.proposedReply.split("\n").join("\n> ") : "*(agent will generate)*"}\n`);
       }
-      lines.push(`(dry-run — nothing posted)`);
+      lines.push(`*(dry-run — nothing posted)*`);
       return { text: lines.join("\n") };
     } catch (err) {
       return { text: `Error: ${err}` };
@@ -835,7 +843,7 @@ export default function register(api: OpenClawPluginApi): void {
   // --- Slash command: /yt ---
   api.registerCommand({
     name: "yt",
-    description: "YouTube comments quick status. Subcommands: scan, identities",
+    description: "YouTube comments — scan, preview, auto-reply, identities. Try /yt help",
     acceptsArgs: true,
     handler: handleYtCommand,
   });
@@ -880,6 +888,19 @@ function toolResult(data: unknown): ToolResult {
   return {
     content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
   };
+}
+
+/** Format ISO date as relative time: "5m ago", "3h ago", "2d ago", or "Feb 10" */
+function timeAgo(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 60) return `${Math.max(mins, 1)}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  const d = new Date(iso);
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 function randomInt(min: number, max: number): number {
