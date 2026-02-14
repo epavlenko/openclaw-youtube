@@ -511,94 +511,30 @@ async function handleYtCommand(ctx: { args?: string }): Promise<{ text: string }
   const subcommand = args.replace(/\bas\s+\w+/, "").replace(/\blimit\s+\d+/, "").trim();
 
   if (subcommand === "scan" || subcommand === "check") {
-    try {
-      await ensureInitialized();
-      const scanParams: Record<string, unknown> = { mode: "interactive" };
-      if (scanIdentity) scanParams.identity = scanIdentity;
-      if (scanLimit) scanParams.limit = scanLimit;
-      const result = await handleYoutubeScan(scanParams);
-      const pendingCount = result.items.filter((i) => i.status === "pending").length;
-      const skippedCount = result.items.filter((i) => i.status === "skipped").length;
-      if (pendingCount === 0) {
-        return { text: `No new comments found. (scanned ${result.found} total, ${skippedCount} skipped)` };
-      }
-      // Format each pending item for the agent to present
-      const needsGeneration = result.items.some((i) => i.status === "pending" && !i.proposedReply);
-      const lines: string[] = [];
-      lines.push(...formatScanItems(result.items));
-      lines.unshift(`Found ${pendingCount} comments to review (${skippedCount} skipped)\n`);
-      if (needsGeneration) {
-        lines.push(`---`);
-        lines.push(`**Identity prompt for reply generation:**`);
-        lines.push(result.identityPrompt);
-        lines.push(``);
-        lines.push(`Generate a reply for each comment above where Reply is [reply-text]. Use the identity prompt, comment text, and video context. Reply in the same language as the comment. Present each reply and ask the user to approve or skip.`);
-      }
-      return { text: lines.join("\n") };
-    } catch (err) {
-      return { text: `Error: ${err}` };
-    }
+    const params: string[] = [`mode: "interactive"`];
+    if (scanIdentity) params.push(`identity: "${scanIdentity}"`);
+    if (scanLimit) params.push(`limit: ${scanLimit}`);
+    return {
+      text: `Scan YouTube comments for review. Call youtube_scan tool with { ${params.join(", ")} } to fetch comments, generate replies, and present them one by one for approval.`,
+    };
   }
 
   if (subcommand === "preview" || subcommand === "dry-run") {
-    try {
-      await ensureInitialized();
-      const scanParams: Record<string, unknown> = { mode: "dry-run" };
-      if (scanIdentity) scanParams.identity = scanIdentity;
-      if (scanLimit) scanParams.limit = scanLimit;
-      const result = await handleYoutubeScan(scanParams);
-      const pendingCount = result.items.filter((i) => i.status === "pending").length;
-      const skippedCount = result.items.filter((i) => i.status === "skipped").length;
-      if (pendingCount === 0) {
-        return { text: `No new comments found. (${skippedCount} skipped)` };
-      }
-      const needsGeneration = result.items.some((i) => i.status === "pending" && !i.proposedReply);
-      const lines: string[] = [];
-      lines.push(...formatScanItems(result.items));
-      lines.unshift(`Preview: ${pendingCount} comments (${skippedCount} skipped)\n`);
-      lines.push(`(dry-run — nothing posted)`);
-      // When no backend generated replies, give the agent identity prompt + instructions
-      if (needsGeneration) {
-        lines.push(``);
-        lines.push(`---`);
-        lines.push(`**Identity prompt for reply generation:**`);
-        lines.push(result.identityPrompt);
-        lines.push(``);
-        lines.push(`Generate a reply for each comment above where Reply is [reply-text]. Use the identity prompt, comment text, and video context. Reply in the same language as the comment. This is a preview — do NOT post anything.`);
-      }
-      return { text: lines.join("\n") };
-    } catch (err) {
-      return { text: `Error: ${err}` };
-    }
+    const params: string[] = [`mode: "dry-run"`];
+    if (scanIdentity) params.push(`identity: "${scanIdentity}"`);
+    if (scanLimit) params.push(`limit: ${scanLimit}`);
+    return {
+      text: `Preview YouTube comment replies. Call youtube_scan tool with { ${params.join(", ")} } to fetch comments and generate reply previews. Do NOT post anything — this is preview only.`,
+    };
   }
 
   if (subcommand === "auto") {
-    try {
-      await ensureInitialized();
-      const scanParams: Record<string, unknown> = { mode: "auto" };
-      if (scanIdentity) scanParams.identity = scanIdentity;
-      if (scanLimit) scanParams.limit = scanLimit;
-      const result = await handleYoutubeScan(scanParams);
-      const postedCount = result.items.filter((i) => i.status === "posted").length;
-      const pendingCount = result.items.filter((i) => i.status === "pending").length;
-      const skippedCount = result.items.filter((i) => i.status === "skipped").length;
-      const lines: string[] = [];
-      if (postedCount > 0) {
-        lines.push(`Auto-posted ${postedCount} replies.`);
-      }
-      if (pendingCount > 0) {
-        lines.push(`${pendingCount} replies need agent to generate & post.`);
-      }
-      if (skippedCount > 0) {
-        lines.push(`${skippedCount} skipped.`);
-      }
-      if (lines.length === 0) {
-        lines.push(`No new comments found.`);
-      }
-      return { text: lines.join("\n") };
-    } catch (err) {
-      return { text: `Error: ${err}` };
-    }
+    const params: string[] = [`mode: "auto"`];
+    if (scanIdentity) params.push(`identity: "${scanIdentity}"`);
+    if (scanLimit) params.push(`limit: ${scanLimit}`);
+    return {
+      text: `Auto-reply to YouTube comments. Confirm with the user first, then call youtube_scan tool with { ${params.join(", ")} } to fetch comments, generate replies, and post them automatically.`,
+    };
   }
 
   if (subcommand === "identities" || subcommand === "ids") {
@@ -872,67 +808,6 @@ function toolResult(data: unknown): ToolResult {
   return {
     content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
   };
-}
-
-/** Format ISO date as "YYYY.MM.DD HH:mm" */
-function formatDate(iso: string): string {
-  const d = new Date(iso);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}.${pad(d.getMonth() + 1)}.${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-const SEPARATOR_THREAD = "================================================================";
-const SEPARATOR_COMMENT = "----------------------------------------------------------------";
-
-/** Format scan items for /yt scan and /yt preview output */
-function formatScanItems(items: ScanItem[]): string[] {
-  const lines: string[] = [];
-  // Group items by video
-  const byVideo = new Map<string, ScanItem[]>();
-  for (const item of items) {
-    if (item.status === "skipped") continue;
-    const key = item.videoId;
-    if (!byVideo.has(key)) byVideo.set(key, []);
-    byVideo.get(key)!.push(item);
-  }
-
-  let firstVideo = true;
-  for (const [, videoItems] of byVideo) {
-    if (!firstVideo) {
-      lines.push(``);
-    }
-    // Video title once per group
-    lines.push(`🎬 ${videoItems[0].videoTitle}`);
-
-    for (const item of videoItems) {
-      lines.push(SEPARATOR_THREAD);
-      // Top-level comment
-      lines.push(`${formatDate(item.published)} / ${item.author}: ${item.text}`);
-      // Thread replies
-      if (item.isThread && item.thread.length > 0) {
-        for (const r of item.thread) {
-          lines.push(SEPARATOR_COMMENT);
-          const marker = r.isOurs ? " (you)" : "";
-          const date = r.published ? `${formatDate(r.published)} / ` : "";
-          lines.push(`${date}${r.author}${marker}: ${r.text}`);
-        }
-      }
-      // Reply
-      lines.push(SEPARATOR_THREAD);
-      if (item.proposedReply) {
-        lines.push(`Reply: ${item.proposedReply}`);
-      } else {
-        lines.push(`Reply: [reply-text]`);
-      }
-      lines.push(SEPARATOR_THREAD);
-      // Separator between threads: two blank lines before next thread
-      lines.push(``);
-      lines.push(``);
-    }
-    firstVideo = false;
-  }
-
-  return lines;
 }
 
 function randomInt(min: number, max: number): number {
