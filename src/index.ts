@@ -335,6 +335,7 @@ async function handleYoutubeGenerate(params: Record<string, unknown>): Promise<{
         author: s.authorDisplayName ?? "Unknown",
         text: (s.textDisplay ?? "").trim(),
         isOurs: ourChannelIds.has(authorChannel),
+        published: s.publishedAt ?? "",
       });
     }
   } catch {
@@ -522,27 +523,16 @@ async function handleYtCommand(ctx: { args?: string }): Promise<{ text: string }
         return { text: `No new comments found. (scanned ${result.found} total, ${skippedCount} skipped)` };
       }
       // Format each pending item for the agent to present
-      const lines: string[] = [`Found ${pendingCount} comments to review (${skippedCount} skipped):\n`];
-      let idx = 0;
-      for (const item of result.items) {
-        if (item.status === "skipped") continue;
-        idx++;
+      const needsGeneration = result.items.some((i) => i.status === "pending" && !i.proposedReply);
+      const lines: string[] = [];
+      lines.push(...formatScanItems(result.items));
+      lines.unshift(`Found ${pendingCount} comments to review (${skippedCount} skipped)\n`);
+      if (needsGeneration) {
         lines.push(`---`);
-        lines.push(`**${idx}.** 🎬 **${item.videoTitle}**`);
-        lines.push(`**@${item.author}** · ${timeAgo(item.published)}\n`);
-        lines.push(`> ${item.text.split("\n").join("\n> ")}\n`);
-        if (item.isThread && item.thread.length > 0) {
-          lines.push(`Thread:`);
-          for (const r of item.thread) {
-            lines.push(`> **@${r.author}**${r.isOurs ? " (you)" : ""}: ${r.text}`);
-          }
-          lines.push(``);
-        }
-        if (item.proposedReply) {
-          lines.push(`Proposed reply:`);
-          lines.push(`> ${item.proposedReply.split("\n").join("\n> ")}\n`);
-        }
-        lines.push(`\`commentId: ${item.commentId}\`\n`);
+        lines.push(`**Identity prompt for reply generation:**`);
+        lines.push(result.identityPrompt);
+        lines.push(``);
+        lines.push(`Generate a reply for each comment above where Reply is [reply-text]. Use the identity prompt, comment text, and video context. Reply in the same language as the comment. Present each reply and ask the user to approve or skip.`);
       }
       return { text: lines.join("\n") };
     } catch (err) {
@@ -562,26 +552,20 @@ async function handleYtCommand(ctx: { args?: string }): Promise<{ text: string }
       if (pendingCount === 0) {
         return { text: `No new comments found. (${skippedCount} skipped)` };
       }
-      const lines: string[] = [`Preview: ${pendingCount} comments (${skippedCount} skipped)\n`];
-      let idx = 0;
-      for (const item of result.items) {
-        if (item.status === "skipped") continue;
-        idx++;
+      const needsGeneration = result.items.some((i) => i.status === "pending" && !i.proposedReply);
+      const lines: string[] = [];
+      lines.push(...formatScanItems(result.items));
+      lines.unshift(`Preview: ${pendingCount} comments (${skippedCount} skipped)\n`);
+      lines.push(`(dry-run — nothing posted)`);
+      // When no backend generated replies, give the agent identity prompt + instructions
+      if (needsGeneration) {
+        lines.push(``);
         lines.push(`---`);
-        lines.push(`**${idx}.** 🎬 **${item.videoTitle}**`);
-        lines.push(`**@${item.author}** · ${timeAgo(item.published)}\n`);
-        lines.push(`> ${item.text.split("\n").join("\n> ")}\n`);
-        if (item.isThread && item.thread.length > 0) {
-          lines.push(`Thread:`);
-          for (const r of item.thread) {
-            lines.push(`> **@${r.author}**${r.isOurs ? " (you)" : ""}: ${r.text}`);
-          }
-          lines.push(``);
-        }
-        lines.push(`Reply:`);
-        lines.push(`> ${item.proposedReply ? item.proposedReply.split("\n").join("\n> ") : "*(agent will generate)*"}\n`);
+        lines.push(`**Identity prompt for reply generation:**`);
+        lines.push(result.identityPrompt);
+        lines.push(``);
+        lines.push(`Generate a reply for each comment above where Reply is [reply-text]. Use the identity prompt, comment text, and video context. Reply in the same language as the comment. This is a preview — do NOT post anything.`);
       }
-      lines.push(`*(dry-run — nothing posted)*`);
       return { text: lines.join("\n") };
     } catch (err) {
       return { text: `Error: ${err}` };
@@ -890,17 +874,65 @@ function toolResult(data: unknown): ToolResult {
   };
 }
 
-/** Format ISO date as relative time: "5m ago", "3h ago", "2d ago", or "Feb 10" */
-function timeAgo(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(diff / 60_000);
-  if (mins < 60) return `${Math.max(mins, 1)}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
+/** Format ISO date as "YYYY.MM.DD HH:mm" */
+function formatDate(iso: string): string {
   const d = new Date(iso);
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}.${pad(d.getMonth() + 1)}.${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+const SEPARATOR_THREAD = "================================================================";
+const SEPARATOR_COMMENT = "----------------------------------------------------------------";
+
+/** Format scan items for /yt scan and /yt preview output */
+function formatScanItems(items: ScanItem[]): string[] {
+  const lines: string[] = [];
+  // Group items by video
+  const byVideo = new Map<string, ScanItem[]>();
+  for (const item of items) {
+    if (item.status === "skipped") continue;
+    const key = item.videoId;
+    if (!byVideo.has(key)) byVideo.set(key, []);
+    byVideo.get(key)!.push(item);
+  }
+
+  let firstVideo = true;
+  for (const [, videoItems] of byVideo) {
+    if (!firstVideo) {
+      lines.push(``);
+    }
+    // Video title once per group
+    lines.push(`🎬 ${videoItems[0].videoTitle}`);
+
+    for (const item of videoItems) {
+      lines.push(SEPARATOR_THREAD);
+      // Top-level comment
+      lines.push(`${formatDate(item.published)} / ${item.author}: ${item.text}`);
+      // Thread replies
+      if (item.isThread && item.thread.length > 0) {
+        for (const r of item.thread) {
+          lines.push(SEPARATOR_COMMENT);
+          const marker = r.isOurs ? " (you)" : "";
+          const date = r.published ? `${formatDate(r.published)} / ` : "";
+          lines.push(`${date}${r.author}${marker}: ${r.text}`);
+        }
+      }
+      // Reply
+      lines.push(SEPARATOR_THREAD);
+      if (item.proposedReply) {
+        lines.push(`Reply: ${item.proposedReply}`);
+      } else {
+        lines.push(`Reply: [reply-text]`);
+      }
+      lines.push(SEPARATOR_THREAD);
+      // Separator between threads: two blank lines before next thread
+      lines.push(``);
+      lines.push(``);
+    }
+    firstVideo = false;
+  }
+
+  return lines;
 }
 
 function randomInt(min: number, max: number): number {

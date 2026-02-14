@@ -26,8 +26,8 @@ describe("youtube", () => {
 
     it("formats a comment with replies", () => {
       const thread: ThreadReply[] = [
-        { author: "VOLKOVA", text: "Thank you!", isOurs: true },
-        { author: "FanUser", text: "Can't wait for the next one", isOurs: false },
+        { author: "VOLKOVA", text: "Thank you!", isOurs: true, published: "2026-02-10T09:00:00Z" },
+        { author: "FanUser", text: "Can't wait for the next one", isOurs: false, published: "2026-02-10T10:00:00Z" },
       ];
 
       const result = formatThreadForPrompt(comment, thread);
@@ -38,7 +38,7 @@ describe("youtube", () => {
 
     it("indents thread replies with two spaces", () => {
       const thread: ThreadReply[] = [
-        { author: "OtherUser", text: "Amazing!", isOurs: false },
+        { author: "OtherUser", text: "Amazing!", isOurs: false, published: "2026-02-10T09:00:00Z" },
       ];
 
       const lines = formatThreadForPrompt(comment, thread).split("\n");

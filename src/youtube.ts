@@ -230,6 +230,7 @@ export async function getThreadContext(
       author: snippet.authorDisplayName ?? "Unknown",
       text: (snippet.textDisplay ?? "").trim(),
       isOurs: ourChannelIds.has(authorChannel),
+      published: snippet.publishedAt ?? "",
     });
   }
 

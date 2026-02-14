@@ -93,8 +93,8 @@ describe("identities", () => {
 
     it("formats a comment with thread replies", () => {
       const thread: ThreadReply[] = [
-        { author: "VOLKOVA", text: "Thank you so much!", isOurs: true },
-        { author: "MusicLover42", text: "When is the next one?", isOurs: false },
+        { author: "VOLKOVA", text: "Thank you so much!", isOurs: true, published: "2026-02-10T09:00:00Z" },
+        { author: "MusicLover42", text: "When is the next one?", isOurs: false, published: "2026-02-10T10:00:00Z" },
       ];
 
       const result = formatThreadForPrompt(mockComment, thread);
@@ -107,8 +107,8 @@ describe("identities", () => {
 
     it("marks our replies with (you)", () => {
       const thread: ThreadReply[] = [
-        { author: "SomeUser", text: "Nice!", isOurs: false },
-        { author: "VOLKOVA", text: "Thanks!", isOurs: true },
+        { author: "SomeUser", text: "Nice!", isOurs: false, published: "2026-02-10T09:00:00Z" },
+        { author: "VOLKOVA", text: "Thanks!", isOurs: true, published: "2026-02-10T10:00:00Z" },
       ];
 
       const result = formatThreadForPrompt(mockComment, thread);

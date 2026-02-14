@@ -35,6 +35,8 @@ export interface ThreadReply {
   text: string;
   /** Whether this reply was posted by our channel */
   isOurs: boolean;
+  /** ISO 8601 publish date */
+  published: string;
 }
 
 // ============================================================
