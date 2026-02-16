@@ -683,64 +683,149 @@ async function handleYtCommand(ctx: { args?: string }): Promise<{ text: string }
   // --- /yt reply [dry|auto] ---
   if (subcommand === "reply" || subcommand === "reply dry" || subcommand === "reply auto") {
     let mode: ScanMode = "interactive";
-    let modeDesc = "review & reply";
+    let modeLabel = "Интерактивный режим";
     if (subcommand === "reply dry") {
       mode = "dry-run";
-      modeDesc = "preview (dry-run)";
+      modeLabel = "Превью (dry-run)";
     } else if (subcommand === "reply auto") {
       mode = "auto";
-      modeDesc = "auto-reply (confirm with user first)";
+      modeLabel = "Авторежим";
     }
-    const reviewParams: string[] = [`action: "review"`, `mode: "${mode}"`];
-    if (scanIdentity) reviewParams.push(`identity: "${scanIdentity}"`);
-    if (scanLimit) reviewParams.push(`limit: ${scanLimit}`);
-    return {
-      text:
-        `${modeDesc} mode. First, show the user a list of recent videos to choose from:\n` +
-        `1. Call youtube_channel with { action: "videos" } to get the video list.\n` +
-        `2. Present videos as a numbered list and ask the user to pick one (or "all").\n` +
-        `3. Then call youtube_comments with { ${reviewParams.join(", ")}${scanIdentity || scanLimit ? "" : ', videoId: "<chosen>"'} } to process comments for the selected video.`,
-    };
+    const activeIdentity = scanIdentity ?? pluginConfig.channelIdentity;
+
+    try {
+      await ensureInitialized();
+      const replyAccount = replyAsChannelId ?? "?";
+
+      const { videos } = await handleChannelVideos({});
+      const lines: string[] = [
+        `${modeLabel}`,
+        `Канал: ${pluginConfig.channelId}`,
+        `Аккаунт: ${replyAccount}`,
+        `Персона: ${activeIdentity}`,
+        ``,
+      ];
+
+      if (videos.length === 0) {
+        lines.push("Нет видео с неотвеченными комментариями.");
+      } else {
+        lines.push("Видео с неотвеченными комментариями:");
+        videos.forEach((v, i) => {
+          lines.push(`${i + 1}. ${v.title} — ${v.pendingComments} комм. (${v.id})`);
+        });
+        lines.push("");
+        lines.push('Выбери номер или "все".');
+      }
+
+      return { text: lines.join("\n") };
+    } catch (err) {
+      if (err instanceof AuthRequiredError) {
+        return { text: `Требуется авторизация YouTube.\n${err.authUrl}\n\nОткрой ссылку, авторизуйся и вставь код.` };
+      }
+      return { text: `Ошибка: ${err}` };
+    }
   }
 
   // --- /yt videos ---
   if (subcommand === "videos") {
-    return {
-      text: `List recent channel videos. Call youtube_channel tool with { action: "videos" }. Present as a numbered list.`,
-    };
+    try {
+      await ensureInitialized();
+      const { videos } = await handleChannelVideos({});
+      if (videos.length === 0) {
+        return { text: "Нет видео с неотвеченными комментариями." };
+      }
+      const lines = ["Видео с неотвеченными комментариями:"];
+      videos.forEach((v, i) => {
+        lines.push(`${i + 1}. ${v.title} — ${v.pendingComments} комм. (${v.id})`);
+      });
+      return { text: lines.join("\n") };
+    } catch (err) {
+      if (err instanceof AuthRequiredError) {
+        return { text: `Требуется авторизация YouTube.\n${err.authUrl}` };
+      }
+      return { text: `Ошибка: ${err}` };
+    }
   }
 
   // --- /yt list <videoId> ---
   if (subcommand.startsWith("list")) {
     const videoId = subcommand.replace("list", "").trim();
     if (!videoId) {
-      return { text: "Usage: /yt list <videoId>" };
+      return { text: "Использование: /yt list <videoId>" };
     }
-    return {
-      text: `List comments for video. Call youtube_comments tool with { action: "list", videoId: "${videoId}" }.`,
-    };
+    try {
+      await ensureInitialized();
+      const result = await handleCommentsList({ videoId });
+      if (result.comments.length === 0) {
+        return { text: `Нет комментариев для видео "${result.videoTitle}".` };
+      }
+      const lines = [`Комментарии к "${result.videoTitle}" (${result.comments.length}):`];
+      for (const c of result.comments) {
+        lines.push(`\n@${c.author} (${c.published}):`);
+        lines.push(c.text);
+        if (c.replyCount > 0) lines.push(`  [${c.replyCount} ответов]`);
+        lines.push(`  ID: ${c.id}`);
+      }
+      if (result.nextPageToken) {
+        lines.push(`\nЕсть ещё комментарии (pageToken: ${result.nextPageToken})`);
+      }
+      return { text: lines.join("\n") };
+    } catch (err) {
+      if (err instanceof AuthRequiredError) {
+        return { text: `Требуется авторизация YouTube.\n${err.authUrl}` };
+      }
+      return { text: `Ошибка: ${err}` };
+    }
   }
 
   // --- /yt get <commentId> ---
   if (subcommand.startsWith("get")) {
     const commentId = subcommand.replace("get", "").trim();
     if (!commentId) {
-      return { text: "Usage: /yt get <commentId>" };
+      return { text: "Использование: /yt get <commentId>" };
     }
-    return {
-      text: `Get comment details. Call youtube_comments tool with { action: "get", commentId: "${commentId}" }.`,
-    };
+    try {
+      await ensureInitialized();
+      const result = await handleCommentsGet({ commentId });
+      const lines = [
+        `Видео: ${result.videoTitle}`,
+        `@${result.comment.author} (${result.comment.published}):`,
+        result.comment.text,
+        `Лайков: ${result.comment.likeCount}, ответов: ${result.comment.replyCount}`,
+        `ID: ${result.comment.id}`,
+      ];
+      if (result.thread.length > 0) {
+        lines.push(`\nТред (${result.thread.length} ответов):`);
+        for (const r of result.thread) {
+          const marker = r.isOurs ? " (вы)" : "";
+          lines.push(`  @${r.author}${marker}: ${r.text}`);
+        }
+      }
+      return { text: lines.join("\n") };
+    } catch (err) {
+      if (err instanceof AuthRequiredError) {
+        return { text: `Требуется авторизация YouTube.\n${err.authUrl}` };
+      }
+      return { text: `Ошибка: ${err}` };
+    }
   }
 
   // --- /yt delete <commentId> ---
   if (subcommand.startsWith("delete")) {
     const commentId = subcommand.replace("delete", "").trim();
     if (!commentId) {
-      return { text: "Usage: /yt delete <commentId>" };
+      return { text: "Использование: /yt delete <commentId>" };
     }
-    return {
-      text: `Delete a comment. Confirm with the user first, then call youtube_comments tool with { action: "delete", commentId: "${commentId}" }.`,
-    };
+    try {
+      await ensureInitialized();
+      const result = await handleCommentsDelete({ commentId });
+      return { text: result.success ? `Комментарий ${commentId} удалён.` : `Не удалось удалить комментарий ${commentId}.` };
+    } catch (err) {
+      if (err instanceof AuthRequiredError) {
+        return { text: `Требуется авторизация YouTube.\n${err.authUrl}` };
+      }
+      return { text: `Ошибка: ${err}` };
+    }
   }
 
   // --- /yt moderate <commentId> <status> ---
@@ -749,18 +834,39 @@ async function handleYtCommand(ctx: { args?: string }): Promise<{ text: string }
     const commentId = parts[0];
     const status = parts[1];
     if (!commentId || !status) {
-      return { text: "Usage: /yt moderate <commentId> <published|heldForReview|rejected>" };
+      return { text: "Использование: /yt moderate <commentId> <published|heldForReview|rejected>" };
     }
-    return {
-      text: `Moderate a comment. Call youtube_comments tool with { action: "moderate", commentId: "${commentId}", moderationStatus: "${status}" }.`,
-    };
+    try {
+      await ensureInitialized();
+      const result = await handleCommentsModerate({ commentId, moderationStatus: status });
+      return { text: result.success ? `Статус комментария ${commentId}: ${result.moderationStatus}` : `Не удалось изменить статус комментария ${commentId}.` };
+    } catch (err) {
+      if (err instanceof AuthRequiredError) {
+        return { text: `Требуется авторизация YouTube.\n${err.authUrl}` };
+      }
+      return { text: `Ошибка: ${err}` };
+    }
   }
 
   // --- /yt info ---
   if (subcommand === "info") {
-    return {
-      text: `Get channel info with stats. Call youtube_channel tool with { action: "info" }.`,
-    };
+    try {
+      await ensureInitialized();
+      const info = await handleChannelInfo();
+      return {
+        text:
+          `Канал: ${info.title}\n` +
+          `ID: ${info.id}\n` +
+          `Подписчиков: ${info.subscriberCount}\n` +
+          `Видео: ${info.videoCount}\n` +
+          `Просмотров: ${info.viewCount}`,
+      };
+    } catch (err) {
+      if (err instanceof AuthRequiredError) {
+        return { text: `Требуется авторизация YouTube.\n${err.authUrl}` };
+      }
+      return { text: `Ошибка: ${err}` };
+    }
   }
 
   // --- /yt identities ---
