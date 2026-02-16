@@ -129,10 +129,30 @@ export async function getYouTubeService(
 
     if (isExpired && tokenInfo.refresh_token) {
       log.info("Refreshing expired OAuth token...");
-      const { credentials } = await oauth2Client.refreshAccessToken();
-      oauth2Client.setCredentials(credentials);
-      await saveToken(tokenPath, credentials as unknown as Record<string, unknown>);
-      log.info("OAuth token refreshed successfully");
+      try {
+        const { credentials } = await oauth2Client.refreshAccessToken();
+        oauth2Client.setCredentials(credentials);
+        await saveToken(tokenPath, credentials as unknown as Record<string, unknown>);
+        log.info("OAuth token refreshed successfully");
+      } catch (refreshErr) {
+        // Refresh failed (invalid_grant, revoked token, testing-mode 7-day expiry, etc.)
+        // Delete the stale token and force re-authorization
+        log.error(`Token refresh failed: ${refreshErr}`);
+        try {
+          const { unlink } = await import("node:fs/promises");
+          await unlink(tokenPath);
+          log.info(`Deleted stale token at ${tokenPath}`);
+        } catch {
+          // Token file may already be gone
+        }
+
+        const authUrl = oauth2Client.generateAuthUrl({
+          access_type: "offline",
+          scope: SCOPES,
+          prompt: "consent",
+        });
+        throw new AuthRequiredError(authUrl);
+      }
     }
 
     return google.youtube({ version: "v3", auth: oauth2Client });

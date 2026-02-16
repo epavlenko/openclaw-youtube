@@ -1174,6 +1174,9 @@ async function withAuthHandling(fn: () => Promise<ToolResult>): Promise<ToolResu
     return await fn();
   } catch (err) {
     if (err instanceof AuthRequiredError) {
+      // Reset cached client so next call triggers fresh initialization
+      youtube = null;
+      replyAsChannelId = null;
       return toolResult({
         authRequired: true,
         message: err.message,
