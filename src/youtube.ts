@@ -6,7 +6,16 @@
  */
 
 import type { youtube_v3 } from "googleapis";
-import type { Video, Comment, ThreadReply, PluginConfig } from "./types.js";
+import type {
+  Video,
+  Comment,
+  ThreadReply,
+  PluginConfig,
+  CommentDetail,
+  CommentListResult,
+  ModerationStatus,
+  ChannelInfo,
+} from "./types.js";
 
 interface Logger {
   info: (msg: string) => void;
@@ -351,4 +360,265 @@ export async function scanVideoForTasks(
   }
 
   return tasks;
+}
+
+// ============================================================
+// List comments (raw, for CRUD — no AI filtering)
+// ============================================================
+
+export interface ListCommentsOptions {
+  maxResults?: number;
+  pageToken?: string;
+  order?: "time" | "relevance";
+  maxCommentAgeDays?: number;
+  minCommentLength?: number;
+  searchQuery?: string;
+}
+
+/**
+ * List comments for a video with optional filters and pagination.
+ * Unlike getComments(), this returns CommentDetail with full metadata
+ * and does not filter self-comments.
+ */
+export async function listComments(
+  youtube: youtube_v3.Youtube,
+  videoId: string,
+  opts: ListCommentsOptions = {},
+  logger: Logger = defaultLogger,
+): Promise<CommentListResult> {
+  const maxResults = Math.min(opts.maxResults ?? 20, 100);
+  logger.info(`Listing comments for video ${videoId} (max ${maxResults})...`);
+
+  const video = await getVideoInfo(youtube, videoId);
+
+  let response;
+  try {
+    response = await youtube.commentThreads.list({
+      part: ["snippet"],
+      videoId,
+      maxResults,
+      order: opts.order ?? "time",
+      textFormat: "plainText",
+      pageToken: opts.pageToken,
+    });
+  } catch (err) {
+    logger.warn(`Could not fetch comments for ${videoId}: ${err}`);
+    return { videoId, videoTitle: video.title, comments: [], totalResults: 0 };
+  }
+
+  const cutoff = opts.maxCommentAgeDays
+    ? new Date(Date.now() - opts.maxCommentAgeDays * 86400000)
+    : null;
+
+  const comments: CommentDetail[] = [];
+
+  for (const item of response.data.items ?? []) {
+    const snippet = item.snippet?.topLevelComment?.snippet;
+    if (!snippet) continue;
+
+    const text = (snippet.textDisplay ?? "").trim();
+    const published = snippet.publishedAt ?? "";
+
+    if (cutoff && new Date(published) < cutoff) continue;
+    if (opts.minCommentLength && text.length < opts.minCommentLength) continue;
+    if (opts.searchQuery && !text.toLowerCase().includes(opts.searchQuery.toLowerCase())) continue;
+
+    comments.push({
+      id: item.snippet!.topLevelComment!.id!,
+      text,
+      author: snippet.authorDisplayName ?? "Unknown",
+      published,
+      replyCount: item.snippet!.totalReplyCount ?? 0,
+      likeCount: snippet.likeCount ?? 0,
+      videoId,
+      authorChannelId:
+        (snippet.authorChannelId as Record<string, string> | undefined)?.value ?? "",
+    });
+  }
+
+  logger.info(`Listed ${comments.length} comments for video ${videoId}`);
+  return {
+    videoId,
+    videoTitle: video.title,
+    comments,
+    totalResults: response.data.pageInfo?.totalResults ?? comments.length,
+    nextPageToken: response.data.nextPageToken ?? undefined,
+  };
+}
+
+// ============================================================
+// Get single comment with thread
+// ============================================================
+
+/**
+ * Fetch a single comment by ID with full thread context and video info.
+ */
+export async function getComment(
+  youtube: youtube_v3.Youtube,
+  commentId: string,
+  replyAsChannelId: string,
+  channelId: string,
+  logger: Logger = defaultLogger,
+): Promise<{
+  comment: CommentDetail;
+  thread: ThreadReply[];
+  videoTitle: string;
+  videoDescription: string;
+}> {
+  const response = await youtube.comments.list({
+    part: ["snippet"],
+    id: [commentId],
+    textFormat: "plainText",
+  });
+
+  const items = response.data.items ?? [];
+  if (items.length === 0) {
+    throw new Error(`Comment ${commentId} not found`);
+  }
+
+  const snippet = items[0].snippet!;
+  const parentId = snippet.parentId ?? undefined;
+
+  // Determine the top-level comment ID (for thread context)
+  const topLevelId = parentId ?? commentId;
+
+  // Get thread context using a Comment-shaped object
+  const threadComment: Comment = {
+    id: topLevelId,
+    text: (snippet.textDisplay ?? "").trim(),
+    author: snippet.authorDisplayName ?? "Unknown",
+    published: snippet.publishedAt ?? "",
+    replyCount: parentId ? 0 : 1, // if it's a top-level comment with replies
+  };
+
+  // Fetch reply count from commentThreads if it's a top-level comment
+  let replyCount = 0;
+  if (!parentId) {
+    try {
+      const threadResponse = await youtube.commentThreads.list({
+        part: ["snippet"],
+        id: [commentId],
+      });
+      replyCount = threadResponse.data.items?.[0]?.snippet?.totalReplyCount ?? 0;
+      threadComment.replyCount = replyCount;
+    } catch {
+      // Ignore — we'll just fetch what we can
+    }
+  }
+
+  const thread = await getThreadContext(youtube, threadComment, replyAsChannelId, channelId, logger) ?? [];
+
+  // Get video info
+  const videoId = snippet.videoId ?? "";
+  const video = videoId ? await getVideoInfo(youtube, videoId) : { id: "", title: "Unknown", description: "" };
+
+  const comment: CommentDetail = {
+    id: commentId,
+    text: (snippet.textDisplay ?? "").trim(),
+    author: snippet.authorDisplayName ?? "Unknown",
+    published: snippet.publishedAt ?? "",
+    replyCount,
+    likeCount: snippet.likeCount ?? 0,
+    videoId,
+    authorChannelId:
+      (snippet.authorChannelId as Record<string, string> | undefined)?.value ?? "",
+    parentId,
+  };
+
+  return {
+    comment,
+    thread,
+    videoTitle: video.title,
+    videoDescription: video.description,
+  };
+}
+
+// ============================================================
+// Delete comment
+// ============================================================
+
+/**
+ * Delete a YouTube comment. Works for own comments or comments on own videos.
+ */
+export async function deleteComment(
+  youtube: youtube_v3.Youtube,
+  commentId: string,
+  logger: Logger = defaultLogger,
+): Promise<boolean> {
+  try {
+    await youtube.comments.delete({ id: commentId });
+    logger.info(`Deleted comment ${commentId}`);
+    return true;
+  } catch (err) {
+    logger.warn(`Failed to delete comment ${commentId}: ${err}`);
+    return false;
+  }
+}
+
+// ============================================================
+// Set moderation status
+// ============================================================
+
+/**
+ * Set the moderation status of a comment.
+ * Only works for comments on videos owned by the authenticated user.
+ */
+export async function setModerationStatus(
+  youtube: youtube_v3.Youtube,
+  commentId: string,
+  moderationStatus: ModerationStatus,
+  banAuthor: boolean = false,
+  logger: Logger = defaultLogger,
+): Promise<boolean> {
+  try {
+    await youtube.comments.setModerationStatus({
+      id: [commentId],
+      moderationStatus,
+      banAuthor,
+    });
+    logger.info(`Set moderation status of ${commentId} to ${moderationStatus}`);
+    return true;
+  } catch (err) {
+    logger.warn(`Failed to moderate comment ${commentId}: ${err}`);
+    return false;
+  }
+}
+
+// ============================================================
+// Channel info
+// ============================================================
+
+/**
+ * Get channel info with statistics.
+ */
+export async function getChannelInfo(
+  youtube: youtube_v3.Youtube,
+  channelId: string,
+  logger: Logger = defaultLogger,
+): Promise<ChannelInfo> {
+  logger.info(`Fetching channel info for ${channelId}...`);
+
+  const response = await youtube.channels.list({
+    part: ["snippet", "statistics"],
+    id: [channelId],
+  });
+
+  const items = response.data.items ?? [];
+  if (items.length === 0) {
+    throw new Error(`Channel ${channelId} not found`);
+  }
+
+  const item = items[0];
+  const snippet = item.snippet!;
+  const stats = item.statistics!;
+
+  return {
+    id: channelId,
+    title: snippet.title ?? "Unknown",
+    description: snippet.description ?? "",
+    subscriberCount: stats.subscriberCount ?? "0",
+    videoCount: stats.videoCount ?? "0",
+    viewCount: stats.viewCount ?? "0",
+    thumbnailUrl: snippet.thumbnails?.default?.url ?? "",
+  };
 }

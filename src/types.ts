@@ -40,6 +40,58 @@ export interface ThreadReply {
 }
 
 // ============================================================
+// Action Types for Grouped Tools
+// ============================================================
+
+export type CommentsAction = "list" | "get" | "reply" | "delete" | "moderate" | "review" | "generate";
+export type ChannelAction = "status" | "info" | "videos";
+export type ModerationStatus = "published" | "heldForReview" | "rejected";
+
+// ============================================================
+// Comment Detail Types (for list/get)
+// ============================================================
+
+/** Extended comment with full metadata — used by list/get actions */
+export interface CommentDetail extends Comment {
+  likeCount: number;
+  videoId: string;
+  authorChannelId: string;
+  /** Parent comment ID if this is a reply */
+  parentId?: string;
+}
+
+export interface CommentListResult {
+  videoId: string;
+  videoTitle: string;
+  comments: CommentDetail[];
+  totalResults: number;
+  nextPageToken?: string;
+}
+
+export interface ChannelInfo {
+  id: string;
+  title: string;
+  description: string;
+  subscriberCount: string;
+  videoCount: string;
+  viewCount: string;
+  thumbnailUrl: string;
+}
+
+export interface DeleteResult {
+  commentId: string;
+  success: boolean;
+  message?: string;
+}
+
+export interface ModerateResult {
+  commentId: string;
+  moderationStatus: ModerationStatus;
+  success: boolean;
+  message?: string;
+}
+
+// ============================================================
 // Scan & Reply Types
 // ============================================================
 
@@ -80,6 +132,9 @@ export interface PluginConfig {
   maxCommentsPerVideo: number;
   maxCommentAgeDays: number;
   minCommentLength: number;
+  /** Identity bound to the channel owner — used as default for review/generate */
+  channelIdentity: string;
+  /** @deprecated Use channelIdentity instead */
   defaultIdentity: string;
   replyDelayMin: number;
   replyDelayMax: number;
@@ -99,7 +154,8 @@ export function resolveConfig(raw: Record<string, unknown>): PluginConfig {
     maxCommentsPerVideo: (raw.maxCommentsPerVideo as number) ?? 50,
     maxCommentAgeDays: (raw.maxCommentAgeDays as number) ?? 7,
     minCommentLength: (raw.minCommentLength as number) ?? 3,
-    defaultIdentity: (raw.defaultIdentity as string) ?? "volkova",
+    channelIdentity: (raw.channelIdentity as string) ?? (raw.defaultIdentity as string) ?? "volkova",
+    defaultIdentity: (raw.defaultIdentity as string) ?? (raw.channelIdentity as string) ?? "volkova",
     replyDelayMin: (raw.replyDelayMin as number) ?? 10,
     replyDelayMax: (raw.replyDelayMax as number) ?? 60,
     oauthCredentialsPath: raw.oauthCredentialsPath as string | undefined,

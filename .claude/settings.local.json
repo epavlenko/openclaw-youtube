@@ -3,7 +3,13 @@
     "allow": [
       "Bash(npm run lint:*)",
       "Bash(npm run test:*)",
-      "Bash(npm run build:*)"
+      "Bash(npm run build:*)",
+      "Bash(git push:*)",
+      "Bash(git fetch:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "WebSearch",
+      "WebFetch(domain:steipete.me)"
     ]
   }
 }

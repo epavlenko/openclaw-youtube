@@ -11,7 +11,7 @@
  */
 
 import type { Video, Comment, ThreadReply, PluginConfig, OpenClawPluginApi, ReplyBackend } from "./types.js";
-import { loadIdentity, buildNewCommentPrompt, buildThreadReplyPrompt, formatThreadForPrompt } from "./identities.js";
+import { loadIdentity, buildNewCommentPrompt, buildThreadReplyPrompt, formatThreadForPrompt, getReplyToAuthor } from "./identities.js";
 
 interface Logger {
   info: (msg: string) => void;
@@ -60,7 +60,8 @@ export async function generateReply(opts: GenerateReplyOptions): Promise<string 
   let prompt: string;
   if (isThread) {
     const threadText = formatThreadForPrompt(opts.comment, opts.thread);
-    prompt = buildThreadReplyPrompt(identityText, opts.video, threadText);
+    const replyToAuthor = getReplyToAuthor(opts.comment, opts.thread);
+    prompt = buildThreadReplyPrompt(identityText, opts.video, threadText, replyToAuthor);
   } else {
     prompt = buildNewCommentPrompt(identityText, opts.video, opts.comment.text);
   }

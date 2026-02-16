@@ -46,6 +46,8 @@ Your task is to continue a conversation in a YouTube comment thread.
 Reply to the latest message, taking the full thread into account.
 Do NOT repeat what you already said. Be relevant to the latest message.
 
+IMPORTANT: Start your reply with @{reply_to_author} to indicate who you are replying to in the thread.
+
 CRITICAL: Reply STRICTLY in the same language as the conversation thread. If the thread is in English — reply ONLY in English. If in Russian — ONLY in Russian. Never mix languages.
 
 Video context:
@@ -55,7 +57,7 @@ Description: {video_description}
 Thread:
 {thread_text}
 
-Your reply to the latest message:`;
+Your reply to {reply_to_author}:`;
 
 // ============================================================
 // Identity loading
@@ -137,17 +139,34 @@ export function buildNewCommentPrompt(
 /**
  * Build the prompt for a thread reply.
  * Port of the format() call in main.py:298-303.
+ *
+ * @param replyToAuthor — display name of the last non-our commenter in the thread
  */
 export function buildThreadReplyPrompt(
   identity: string,
   video: Video,
   threadText: string,
+  replyToAuthor: string = "user",
 ): string {
   return PROMPT_THREAD_REPLY
     .replace("{identity}", identity)
     .replace("{video_title}", video.title)
     .replace("{video_description}", video.description.slice(0, 500))
-    .replace("{thread_text}", threadText);
+    .replace("{thread_text}", threadText)
+    .replace(/\{reply_to_author\}/g, replyToAuthor);
+}
+
+/**
+ * Get the display name of the last person we should reply to in a thread.
+ * Finds the last non-our reply; falls back to the original comment author.
+ */
+export function getReplyToAuthor(comment: Comment, thread: ThreadReply[]): string {
+  for (let i = thread.length - 1; i >= 0; i--) {
+    if (!thread[i].isOurs) {
+      return thread[i].author;
+    }
+  }
+  return comment.author;
 }
 
 /**

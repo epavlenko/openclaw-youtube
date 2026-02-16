@@ -1,8 +1,8 @@
 {
   "id": "openclaw-youtube",
   "name": "YouTube Comments",
-  "description": "Manage YouTube channel comments — scan new comments, generate AI replies, post with approval workflow. Supports multiple identities, dry-run, interactive, and auto modes.",
-  "version": "0.1.0",
+  "description": "YouTube comment moderation connector — list, get, reply, delete, moderate comments. AI-powered review workflow with identity personas. Supports interactive, dry-run, and auto modes.",
+  "version": "0.2.0",
   "skills": ["skills/youtube-comments"],
   "configSchema": {
     "type": "object",
@@ -10,7 +10,12 @@
     "properties": {
       "channelId": {
         "type": "string",
-        "description": "YouTube channel ID to monitor for comments"
+        "description": "YouTube channel ID to manage comments for"
+      },
+      "channelIdentity": {
+        "type": "string",
+        "default": "volkova",
+        "description": "Identity/persona bound to the channel owner — used as default for review and reply generation"
       },
       "videoIds": {
         "type": "array",
@@ -40,7 +45,7 @@
       "defaultIdentity": {
         "type": "string",
         "default": "volkova",
-        "description": "Default identity/persona for reply generation"
+        "description": "Deprecated — use channelIdentity instead"
       },
       "replyDelayMin": {
         "type": "number",
@@ -79,8 +84,8 @@
   },
   "uiHints": {
     "channelId": { "label": "YouTube Channel ID", "placeholder": "UCxxxxxxxxxxxxxxxx" },
+    "channelIdentity": { "label": "Channel Identity", "placeholder": "volkova" },
     "oauthCredentialsPath": { "label": "OAuth Credentials Path", "placeholder": "/path/to/client_secret.json" },
-    "geminiApiKey": { "label": "Gemini API Key (optional)", "sensitive": true },
-    "defaultIdentity": { "label": "Default Identity", "placeholder": "volkova" }
+    "geminiApiKey": { "label": "Gemini API Key (optional)", "sensitive": true }
   }
 }
